@@ -1,0 +1,18 @@
+[package]
+name = "oxideav-ilbc"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/OxideAV/oxideav-ilbc"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust iLBC (Internet Low Bit Rate Codec, RFC 3951) audio decoder"
+
+readme = "README.md"
+homepage = "https://github.com/OxideAV/oxideav-ilbc"
+keywords = ["multimedia", "audio", "ilbc", "telephony", "codec"]
+categories = ["multimedia::encoding", "multimedia::audio"]
+
+[dependencies]
+oxideav-core = "0.1"
+oxideav-codec = "0.1"
