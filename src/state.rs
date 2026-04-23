@@ -4,19 +4,20 @@
 //! logarithmic scale factor (`qmax`) and 3 bits per sample for the
 //! shape. The decoder:
 //!   1. Looks up shape samples from the 3-bit indices.
-//!   2. Rescales by `1 / scal` where `scal = (10^qmax) / 4.5`.
-//!   3. Time-reverses, all-pass filters (inverse of the encoder's phase
-//!      distortion), and time-reverses again.
+//!   2. Rescales by `1 / scal` where `scal = (10^qmax) / 4.5`, i.e.
+//!      multiplies by `maxVal = (10^qmax)/4.5` as in the reference
+//!      `StateConstructW` (RFC 3951 Appendix A.43/44).
+//!   3. Time-reverses the shape vector, pads with zeros to `2·N`,
+//!      filters with the LPC-derived all-pass `Pk(z)=A~rk(z)/A~k(z)`,
+//!      and folds the two halves back together (circular convolution).
 //!   4. Forms the 80-sample state vector: the 23-/22-sample remainder
 //!      is decoded from the first adaptive-codebook sub-block, with
 //!      ordering determined by the `position` bit.
 //!
-//! Mapping notes:
-//! - `qmax` spans a range documented in the RFC; we use the affine
-//!   approximation `qmax = -5 + scale_idx * (5 - (-5)) / 63` which
-//!   covers [-5, +5] in log10, matching the RFC's observed envelope.
+//! Table references:
 //! - Shape dequantisation uses the verbatim `state_sq3Tbl` from
 //!   RFC 3951 Appendix A.8.
+//! - Log-magnitude dequantisation uses `state_frgqTbl` (also A.8).
 
 use crate::FrameMode;
 
@@ -39,18 +40,25 @@ pub const STATE_FRGQ_TBL: [f32; 64] = [
     4.101764,
 ];
 
-/// Decode the logarithmic scale factor.
-/// `scale_idx` is 6 bits; result is `scal = 10^qmax / 4.5`.
+/// Decode the inverse scale factor, i.e. the multiplier the decoder
+/// applies to each shape sample before the all-pass filter.
+///
+/// RFC 3951 §3.5.2 / §4.2 and the reference `StateConstructW`
+/// (Appendix A.44):
+///
+/// ```text
+///     maxVal = state_frgqTbl[idxForMax]        // log10 magnitude
+///     qmax   = 10^maxVal                       // linear magnitude
+///     scal   = 4.5 / qmax                      // encoder's scaling
+///     1/scal = qmax / 4.5 = 10^maxVal / 4.5    // what we return
+/// ```
+///
+/// `scale_idx` is 6 bits; indices outside the 0..63 range are clamped.
 pub fn decode_scale(scale_idx: u8) -> f32 {
-    // Linear mapping from [0..63] -> [-5, +5] in log10.
-    let q = -5.0 + (scale_idx as f32) * (10.0 / 63.0);
-    let scal = 10f32.powf(q) / 4.5;
-    // Return `1.0 / scal`, since the decoder multiplies by the inverse.
-    if scal.abs() < 1e-30 {
-        0.0
-    } else {
-        1.0 / scal
-    }
+    let idx = (scale_idx as usize) & 0x3F;
+    let max_val = STATE_FRGQ_TBL[idx];
+    // 1/scal = 10^max_val / 4.5 per RFC 3951 Appendix A.44 (StateConstructW).
+    10f32.powf(max_val) / 4.5
 }
 
 /// Dequantise the shape samples from 3-bit indices. Output has the
@@ -107,12 +115,25 @@ mod tests {
 
     #[test]
     fn scale_monotone_in_idx() {
-        // Inverse scale should decrease as scale_idx rises (higher qmax
-        // ⇒ larger scal ⇒ smaller 1/scal).
+        // STATE_FRGQ_TBL is monotone-increasing in idx (RFC 3951 A.8),
+        // so 1/scal = 10^maxVal / 4.5 must also rise with scale_idx.
         let a = decode_scale(0);
         let b = decode_scale(32);
         let c = decode_scale(63);
-        assert!(a > b && b > c, "inv_scale not monotone: {a}, {b}, {c}");
+        assert!(
+            a < b && b < c,
+            "1/scal not monotone-increasing: {a}, {b}, {c}"
+        );
+    }
+
+    #[test]
+    fn scale_rfc_anchors() {
+        // 10^1.000085 / 4.5 ≈ 10.00196... / 4.5 ≈ 2.223
+        let lo = decode_scale(0);
+        assert!((lo - 10f32.powf(1.000085) / 4.5).abs() < 1e-6);
+        // 10^4.101764 / 4.5 ≈ 12635 / 4.5 ≈ 2807.8
+        let hi = decode_scale(63);
+        assert!((hi - 10f32.powf(4.101764) / 4.5).abs() < 1e-2);
     }
 
     #[test]
