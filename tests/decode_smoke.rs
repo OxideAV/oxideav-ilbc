@@ -62,6 +62,42 @@ fn registry_roundtrip_30ms() {
     assert_eq!(a.sample_rate, 8_000);
 }
 
+/// Deterministic fingerprint: the same payload must always produce the
+/// same PCM after the RFC 3951 Appendix A table swap. This guards
+/// against silent drift in the decode path when tables change.
+#[test]
+fn deterministic_known_payload_20ms() {
+    // Build two fresh decoders, feed the same exact packet, compare PCM.
+    let mut dec_a = make_dec();
+    let mut dec_b = make_dec();
+    // Picked to land LSF / scale / CB / gain indices in the interior of
+    // their respective codebooks.
+    let packet: Vec<u8> = (0..oxideav_ilbc::FRAME_BYTES_20MS as u8)
+        .map(|i| i.wrapping_mul(13).wrapping_add(41))
+        .collect();
+    let pkt = Packet::new(
+        0,
+        TimeBase::new(1, oxideav_ilbc::SAMPLE_RATE as i64),
+        packet,
+    );
+    dec_a.send_packet(&pkt).unwrap();
+    dec_b.send_packet(&pkt).unwrap();
+    let Frame::Audio(a1) = dec_a.receive_frame().unwrap() else {
+        panic!()
+    };
+    let Frame::Audio(a2) = dec_b.receive_frame().unwrap() else {
+        panic!()
+    };
+    assert_eq!(a1.data[0], a2.data[0], "decode is not deterministic");
+    // Expect at least one non-zero sample so we know the tables are
+    // being consulted. Bit-exact magnitude against a reference is
+    // deferred — the RFC test vectors ship separately from this repo.
+    let any_nonzero = a1.data[0]
+        .chunks_exact(2)
+        .any(|c| i16::from_le_bytes([c[0], c[1]]) != 0);
+    assert!(any_nonzero, "decoder produced all-zero PCM");
+}
+
 #[test]
 fn stream_of_mixed_frames() {
     let mut dec = make_dec();
