@@ -17,12 +17,11 @@ use oxideav_core::{
 
 use crate::bitreader::{parse_frame, FrameParams};
 use crate::cb::{construct_excitation, update_cb_memory};
+use crate::enhancer::{enhance_frame, EnhancerState};
 use crate::lsf::{decode_and_interpolate, dequant_lsf, LsfState};
 use crate::state::reconstruct_scalar_state;
 use crate::synthesis::{conceal_frame, synthesise_frame, SynthState};
-use crate::{
-    FrameMode, CB_LMEM, CODEC_ID_STR, LPC_ORDER, SAMPLE_RATE, STATE_LEN, SUBL,
-};
+use crate::{FrameMode, CB_LMEM, CODEC_ID_STR, LPC_ORDER, SAMPLE_RATE, STATE_LEN, SUBL};
 
 /// Build a boxed [`Decoder`] for iLBC.
 pub fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
@@ -57,6 +56,7 @@ struct IlbcDecoder {
     codec_id: CodecId,
     lsf_state: LsfState,
     synth: SynthState,
+    enhancer: EnhancerState,
     /// 147-sample adaptive-codebook memory (RFC §4.3 `CB_LMEM`).
     cb_mem: [f32; CB_LMEM],
     pending: Option<Packet>,
@@ -70,6 +70,7 @@ impl IlbcDecoder {
             codec_id: CodecId::new(CODEC_ID_STR),
             lsf_state: LsfState::new(),
             synth: SynthState::new(),
+            enhancer: EnhancerState::new(),
             cb_mem: [0.0; CB_LMEM],
             pending: None,
             eof: false,
@@ -83,6 +84,7 @@ impl IlbcDecoder {
         // block as lost and run PLC.
         if fp.empty_flag {
             conceal_frame(&mut self.synth, fp.mode, out);
+            self.enhancer.prev_enh_pl = 1;
             return Ok(());
         }
 
@@ -99,12 +101,8 @@ impl IlbcDecoder {
         // the all-pass phase compensation (which currently is a no-op
         // — see state.rs).
         let a_first: [f32; LPC_ORDER + 1] = a_per_sub[0];
-        let scalar_state = reconstruct_scalar_state(
-            fp.mode,
-            fp.scale_idx,
-            &fp.state_samples,
-            &a_first,
-        );
+        let scalar_state =
+            reconstruct_scalar_state(fp.mode, fp.scale_idx, &fp.state_samples, &a_first);
 
         // Seed the adaptive-codebook memory with the scalar state,
         // padded to STATE_LEN samples. The 23-/22-sample boundary
@@ -140,11 +138,8 @@ impl IlbcDecoder {
         // boundary CB block is used both as the CB-memory seed and to
         // fill any residual bump in the state — we fold its energy
         // into the second half of the state vector.
-        let boundary_exc = construct_excitation(
-            &self.cb_mem,
-            &fp.boundary.cb_idx,
-            &fp.boundary.gain_idx,
-        );
+        let boundary_exc =
+            construct_excitation(&self.cb_mem, &fp.boundary.cb_idx, &fp.boundary.gain_idx);
         // Copy the state vector into the first two sub-blocks of
         // excitation. The `position` bit selects whether the boundary
         // CB samples prepend or append the scalar state; we treat them
@@ -176,8 +171,15 @@ impl IlbcDecoder {
             update_cb_memory(&mut self.cb_mem, &e);
         }
 
-        // Synthesise.
-        synthesise_frame(&excitation, &a_per_sub, &mut self.synth, out);
+        // §4.6 enhancer: smooth the residual using the pitch-
+        // synchronous sequences over the last 640 samples (see the
+        // `enhancer` module). The enhanced excitation drives synthesis.
+        let mut enhanced = vec![0.0f32; excitation.len()];
+        enhance_frame(&mut self.enhancer, fp.mode, &excitation, &mut enhanced);
+
+        // Synthesise from the enhanced excitation.
+        synthesise_frame(&enhanced, &a_per_sub, &mut self.synth, out);
+        self.enhancer.prev_enh_pl = 0;
         Ok(())
     }
 }
@@ -233,6 +235,9 @@ impl Decoder for IlbcDecoder {
             let v = s.round().clamp(-32768.0, 32767.0) as i16;
             bytes.extend_from_slice(&v.to_le_bytes());
         }
+        // mode is implicit in `samples.len()` — reference kept so
+        // future mode-specific trailer/padding logic has a hook.
+        let _ = mode;
         Ok(Frame::Audio(AudioFrame {
             format: SampleFormat::S16,
             channels: 1,
@@ -242,12 +247,6 @@ impl Decoder for IlbcDecoder {
             time_base: self.time_base,
             data: vec![bytes],
         }))
-        .map(|f| {
-            // Trigger a sanity check: the samples per frame must match
-            // the detected mode.
-            let _ = mode;
-            f
-        })
     }
 
     fn flush(&mut self) -> Result<()> {
@@ -258,6 +257,7 @@ impl Decoder for IlbcDecoder {
     fn reset(&mut self) -> Result<()> {
         self.lsf_state.reset();
         self.synth.reset();
+        self.enhancer.reset();
         self.cb_mem = [0.0; CB_LMEM];
         self.pending = None;
         self.eof = false;
@@ -381,7 +381,7 @@ mod tests {
                 let s = i16::from_le_bytes([chunk[0], chunk[1]]);
                 // Not stuck at the clip rails.
                 // sample is finite by construction (clamped + round + cast).
-            let _ = s;
+                let _ = s;
             }
         }
     }

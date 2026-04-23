@@ -1,5 +1,4 @@
-//! LPC synthesis, pitch-emphasis post-filter, and packet-loss
-//! concealment — RFC 3951 §4.5, §4.7, §4.8.
+//! LPC synthesis and packet-loss concealment — RFC 3951 §4.5, §4.7, §4.8.
 //!
 //! The synthesis filter is 10th-order all-pole:
 //!
@@ -7,10 +6,9 @@
 //!     y(n) = x(n) - Σ a[i] * y(n-i),  i = 1..10
 //! ```
 //!
-//! After synthesis we apply a mild pitch-emphasis post-filter as a
-//! stand-in for the RFC's more elaborate enhancer (§4.6). This keeps
-//! the decoder's output perceptually sensible without the full six-
-//! PSSQ combiner — a documented scope deviation.
+//! The §4.6 excitation enhancer is in the [`crate::enhancer`] module
+//! and is invoked by the frame decoder *before* the LPC synthesis
+//! filter runs.
 //!
 //! PLC (§4.5): if a frame is lost (or the empty-frame indicator is
 //! set), we emit a dampened extrapolation from the previous block's
@@ -18,24 +16,9 @@
 
 use crate::{FrameMode, LPC_ORDER, SUBL};
 
-/// Enhancer polyphase interpolation filter — verbatim from RFC 3951
-/// Appendix A.8 `polyphaserTbl`. 4-phase filter of length 7 per
-/// phase (ENH_UPS0=4, 2*ENH_FL0+1=7), total 28 taps. Used by the
-/// §4.6 per-block periodic enhancer to upsample the candidate by 4×.
-/// Not yet wired into the current (simplified) enhancer path.
-pub const POLYPHASER_TBL: [f32; 28] = [
-    0.000000, 0.000000, 0.000000, 1.000000, 0.000000, 0.000000, 0.000000, 0.015625, -0.076904,
-    0.288330, 0.862061, -0.106445, 0.018799, -0.015625, 0.023682, -0.124268, 0.601563, 0.601563,
-    -0.124268, 0.023682, -0.023682, 0.018799, -0.106445, 0.862061, 0.288330, -0.076904, 0.015625,
-    -0.018799,
-];
-
-/// Enhancer sub-block centre positions — verbatim from RFC 3951
-/// Appendix A.8 `enh_plocsTbl`. Eight centres spaced 80 samples apart
-/// across the two-frame enhancer window.
-pub const ENH_PLOCS_TBL: [f32; 8] = [
-    40.0, 120.0, 200.0, 280.0, 360.0, 440.0, 520.0, 600.0,
-];
+// Re-export the enhancer tables here for backward compatibility with
+// existing tests / downstream users that imported them from this module.
+pub use crate::enhancer::{ENH_PLOCS_TBL, POLYPHASER_TBL};
 
 /// LPC synthesis filter state (per-frame).
 #[derive(Clone)]
@@ -101,10 +84,11 @@ pub fn synthesise(
     }
 }
 
-/// Mild pitch-emphasis post-filter approximating RFC §4.8.
-/// y_post(n) = y(n) + 0.25 * y_post(n-1). Single-pole low-pass that
-/// removes HF spectral tilt on telephone-band speech. The filter
-/// memory lives on the `SynthState`.
+/// Kept for backward compatibility (tests / external tools). Applies a
+/// first-order low-pass smoothing: `y_post(n) = y(n) + 0.25*y_post(n-1)`.
+/// Not used by the main decode pipeline; the RFC-proper §4.6 enhancer
+/// handles periodic enhancement on the excitation side, and §4.8
+/// mandates only an optional 65 Hz HP post-filter.
 pub fn pitch_emphasis_post(samples: &mut [f32; SUBL], mem: &mut f32) {
     let alpha = 0.25_f32;
     for n in 0..SUBL {
@@ -130,7 +114,6 @@ pub fn synthesise_frame(
         exc.copy_from_slice(&excitation[sb * SUBL..(sb + 1) * SUBL]);
         let mut y = [0.0f32; SUBL];
         synthesise(&exc, &a_per_sub[sb], &mut state.mem, &mut y);
-        pitch_emphasis_post(&mut y, &mut state.post_mem);
         out[sb * SUBL..(sb + 1) * SUBL].copy_from_slice(&y);
     }
     // Cache the last LPC and excitation RMS for PLC use on future frames.
@@ -168,7 +151,6 @@ pub fn conceal_frame(state: &mut SynthState, mode: FrameMode, out: &mut [f32]) {
         }
         let mut y = [0.0f32; SUBL];
         synthesise(&exc, &state.last_a, &mut state.mem, &mut y);
-        pitch_emphasis_post(&mut y, &mut state.post_mem);
         out[sb * SUBL..(sb + 1) * SUBL].copy_from_slice(&y);
     }
     // Decay the cached RMS so the next concealed frame attenuates

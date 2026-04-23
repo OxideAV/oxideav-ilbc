@@ -1,3 +1,10 @@
+#![allow(
+    clippy::needless_range_loop,
+    clippy::manual_memcpy,
+    clippy::unnecessary_cast,
+    clippy::approx_constant,
+    clippy::excessive_precision
+)]
 //! Synthetic-signal SNR measurement for the start-state reconstruction.
 //!
 //! We can't call a full iLBC encoder (there isn't one in this crate),

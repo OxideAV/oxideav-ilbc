@@ -152,11 +152,7 @@ pub fn parse_frame(packet: &[u8]) -> Result<FrameParams> {
     //    stages (5/4/3). Per Table 3.2 these widths are identical for
     //    both 20 ms and 30 ms modes.
     let boundary = CbStageIndices {
-        cb_idx: [
-            br.read(7)? as u16,
-            br.read(7)? as u16,
-            br.read(7)? as u16,
-        ],
+        cb_idx: [br.read(7)? as u16, br.read(7)? as u16, br.read(7)? as u16],
         gain_idx: [br.read(5)? as u8, br.read(4)? as u8, br.read(3)? as u8],
     };
 
@@ -176,11 +172,7 @@ pub fn parse_frame(packet: &[u8]) -> Result<FrameParams> {
     let mut sub_blocks = Vec::with_capacity(n_sub);
     for i in 0..n_sub {
         let (w2, w3) = if i == 0 { (7, 7) } else { (8, 8) };
-        let cb = [
-            br.read(8)? as u16,
-            br.read(w2)? as u16,
-            br.read(w3)? as u16,
-        ];
+        let cb = [br.read(8)? as u16, br.read(w2)? as u16, br.read(w3)? as u16];
         let g = [br.read(5)? as u8, br.read(4)? as u8, br.read(3)? as u8];
         sub_blocks.push(CbStageIndices {
             cb_idx: cb,

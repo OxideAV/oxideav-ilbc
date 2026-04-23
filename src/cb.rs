@@ -357,8 +357,7 @@ mod tests {
         }
         let pi_w = [0.0_f32, 0.2, 0.4, 0.6, 0.8];
         for k in 0..5 {
-            let expected = (1.0 - pi_w[k]) * (142.0 + k as f32)
-                + pi_w[k] * (122.0 + k as f32);
+            let expected = (1.0 - pi_w[k]) * (142.0 + k as f32) + pi_w[k] * (122.0 + k as f32);
             let got = v_aug[15 + k];
             assert!(
                 (got - expected).abs() < 1e-4,

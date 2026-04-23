@@ -32,13 +32,15 @@
     clippy::doc_lazy_continuation,
     clippy::doc_overindented_list_items,
     clippy::too_many_arguments,
-    clippy::manual_range_contains
+    clippy::manual_range_contains,
+    clippy::manual_memcpy
 )]
 
 pub mod bitreader;
 pub mod cb;
 pub mod codec;
 pub mod decoder;
+pub mod enhancer;
 pub mod lsf;
 pub mod lsf_tables;
 pub mod state;
