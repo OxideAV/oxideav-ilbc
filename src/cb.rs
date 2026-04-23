@@ -21,36 +21,45 @@
 
 use crate::{CB_LMEM, SUBL};
 
-/// Successive-rescale gain dequantisation.
+/// Successive-rescale gain dequantisation (RFC 3951 §3.6.4.2).
 ///
-/// Stage k's gain index picks a quantiser step whose full-scale is the
-/// dequantised stage-(k-1) gain. The RFC Appendix A.22 publishes the
-/// verbatim `gain_sq5Tbl` / `gain_sq4Tbl` / `gain_sq3Tbl` tables; the
-/// canonical centroid layout is symmetric around zero with increasing
-/// magnitude, which we replicate here to keep the decoder structurally
-/// correct on all index values. Documented deviation.
+/// Stage 0 uses `gain_sq5Tbl` (positive-only, 5 bits) with an implicit
+/// scale of 1.0. Stages 1 and 2 use `gain_sq4Tbl` (4 bits) and
+/// `gain_sq3Tbl` (3 bits) respectively, scaled by the absolute value of
+/// the previous stage's dequantised gain (clamped to a floor of 0.1).
+///
+/// All three tables are transcribed verbatim from RFC 3951 Appendix A.8.
 pub const GAIN_SQ5_TBL: [f32; 32] = [
-    -1.00, -0.94, -0.88, -0.81, -0.75, -0.69, -0.63, -0.56, -0.50, -0.44, -0.38, -0.31, -0.25,
-    -0.19, -0.13, -0.06, 0.06, 0.13, 0.19, 0.25, 0.31, 0.38, 0.44, 0.50, 0.56, 0.63, 0.69, 0.75,
-    0.81, 0.88, 0.94, 1.00,
+    0.037476, 0.075012, 0.112488, 0.150024, 0.187500, 0.224976, 0.262512, 0.299988, 0.337524,
+    0.375000, 0.412476, 0.450012, 0.487488, 0.525024, 0.562500, 0.599976, 0.637512, 0.674988,
+    0.712524, 0.750000, 0.787476, 0.825012, 0.862488, 0.900024, 0.937500, 0.974976, 1.012512,
+    1.049988, 1.087524, 1.125000, 1.162476, 1.200012,
 ];
 pub const GAIN_SQ4_TBL: [f32; 16] = [
-    -1.00, -0.88, -0.75, -0.63, -0.50, -0.38, -0.25, -0.13, 0.13, 0.25, 0.38, 0.50, 0.63, 0.75,
-    0.88, 1.00,
+    -1.049988, -0.900024, -0.750000, -0.599976, -0.450012, -0.299988, -0.150024, 0.000000,
+    0.150024, 0.299988, 0.450012, 0.599976, 0.750000, 0.900024, 1.049988, 1.200012,
 ];
-pub const GAIN_SQ3_TBL: [f32; 8] = [-1.00, -0.75, -0.50, -0.25, 0.25, 0.50, 0.75, 1.00];
+pub const GAIN_SQ3_TBL: [f32; 8] = [
+    -1.000000, -0.659973, -0.330017, 0.000000, 0.250000, 0.500000, 0.750000, 1.000000,
+];
+
+/// Gain-floor used by the reference `gaindequant` when the external
+/// scale falls below 0.1 (RFC 3951 Appendix A.22).
+const GAIN_SCALE_FLOOR: f32 = 0.1;
 
 /// Dequantise a 3-stage gain vector given the three raw indices.
 ///
-/// Gain[0] uses the 5-bit table, gain[1] uses 4-bit, gain[2] uses 3-bit.
-/// Successive rescaling: gain[k] centroid is multiplied by |gain[k-1]|
-/// (with a floor) so the second and third stages refine the first.
+/// Mirrors the RFC reference `gaindequant` call sequence:
+///   `gain[0] = gain_sq5Tbl[i0] * max(1.0, 0.1)`
+///   `gain[1] = gain_sq4Tbl[i1] * max(|gain[0]|, 0.1)`
+///   `gain[2] = gain_sq3Tbl[i2] * max(|gain[1]|, 0.1)`
 pub fn decode_gains(indices: &[u8; 3]) -> [f32; 3] {
-    let g0 = GAIN_SQ5_TBL[(indices[0] as usize) % GAIN_SQ5_TBL.len()];
-    let base1 = g0.abs().max(0.1);
-    let g1 = GAIN_SQ4_TBL[(indices[1] as usize) % GAIN_SQ4_TBL.len()] * base1;
-    let base2 = g1.abs().max(0.1);
-    let g2 = GAIN_SQ3_TBL[(indices[2] as usize) % GAIN_SQ3_TBL.len()] * base2;
+    let scale0 = 1.0f32.max(GAIN_SCALE_FLOOR);
+    let g0 = GAIN_SQ5_TBL[(indices[0] as usize) % GAIN_SQ5_TBL.len()] * scale0;
+    let scale1 = g0.abs().max(GAIN_SCALE_FLOOR);
+    let g1 = GAIN_SQ4_TBL[(indices[1] as usize) % GAIN_SQ4_TBL.len()] * scale1;
+    let scale2 = g1.abs().max(GAIN_SCALE_FLOOR);
+    let g2 = GAIN_SQ3_TBL[(indices[2] as usize) % GAIN_SQ3_TBL.len()] * scale2;
     [g0, g1, g2]
 }
 
@@ -123,6 +132,20 @@ mod tests {
         for v in g.iter() {
             assert!(v.is_finite());
         }
+    }
+
+    #[test]
+    fn gain_tables_bit_exact() {
+        // Verbatim RFC 3951 Appendix A.8 endpoints / mid-points.
+        assert_eq!(GAIN_SQ5_TBL[0], 0.037476);
+        assert_eq!(GAIN_SQ5_TBL[31], 1.200012);
+        assert_eq!(GAIN_SQ4_TBL[0], -1.049988);
+        assert_eq!(GAIN_SQ4_TBL[7], 0.000000);
+        assert_eq!(GAIN_SQ4_TBL[15], 1.200012);
+        assert_eq!(GAIN_SQ3_TBL[0], -1.000000);
+        assert_eq!(GAIN_SQ3_TBL[1], -0.659973);
+        assert_eq!(GAIN_SQ3_TBL[3], 0.000000);
+        assert_eq!(GAIN_SQ3_TBL[7], 1.000000);
     }
 
     #[test]
