@@ -43,6 +43,14 @@ pub const GAIN_SQ3_TBL: [f32; 8] = [
     -1.000000, -0.659973, -0.330017, 0.000000, 0.250000, 0.500000, 0.750000, 1.000000,
 ];
 
+/// CB expansion filter — verbatim from RFC 3951 Appendix A.8
+/// `cbfiltersTbl` (8 taps). Used by the codebook expansion procedure
+/// of §3.6.3 when the index selects the augmented region of the
+/// adaptive codebook memory. Not yet wired into `extract_cbvec`.
+pub const CB_FILTERS_TBL: [f32; 8] = [
+    -0.034180, 0.108887, -0.184326, 0.806152, 0.713379, -0.144043, 0.083740, -0.033691,
+];
+
 /// Gain-floor used by the reference `gaindequant` when the external
 /// scale falls below 0.1 (RFC 3951 Appendix A.22).
 const GAIN_SCALE_FLOOR: f32 = 0.1;
@@ -132,6 +140,16 @@ mod tests {
         for v in g.iter() {
             assert!(v.is_finite());
         }
+    }
+
+    #[test]
+    fn cb_filters_bit_exact() {
+        // Verbatim RFC 3951 Appendix A.8 `cbfiltersTbl` endpoints.
+        assert_eq!(CB_FILTERS_TBL.len(), 8);
+        assert_eq!(CB_FILTERS_TBL[0], -0.034180);
+        assert_eq!(CB_FILTERS_TBL[3], 0.806152);
+        assert_eq!(CB_FILTERS_TBL[4], 0.713379);
+        assert_eq!(CB_FILTERS_TBL[7], -0.033691);
     }
 
     #[test]

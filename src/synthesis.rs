@@ -18,6 +18,25 @@
 
 use crate::{FrameMode, LPC_ORDER, SUBL};
 
+/// Enhancer polyphase interpolation filter — verbatim from RFC 3951
+/// Appendix A.8 `polyphaserTbl`. 4-phase filter of length 7 per
+/// phase (ENH_UPS0=4, 2*ENH_FL0+1=7), total 28 taps. Used by the
+/// §4.6 per-block periodic enhancer to upsample the candidate by 4×.
+/// Not yet wired into the current (simplified) enhancer path.
+pub const POLYPHASER_TBL: [f32; 28] = [
+    0.000000, 0.000000, 0.000000, 1.000000, 0.000000, 0.000000, 0.000000, 0.015625, -0.076904,
+    0.288330, 0.862061, -0.106445, 0.018799, -0.015625, 0.023682, -0.124268, 0.601563, 0.601563,
+    -0.124268, 0.023682, -0.023682, 0.018799, -0.106445, 0.862061, 0.288330, -0.076904, 0.015625,
+    -0.018799,
+];
+
+/// Enhancer sub-block centre positions — verbatim from RFC 3951
+/// Appendix A.8 `enh_plocsTbl`. Eight centres spaced 80 samples apart
+/// across the two-frame enhancer window.
+pub const ENH_PLOCS_TBL: [f32; 8] = [
+    40.0, 120.0, 200.0, 280.0, 360.0, 440.0, 520.0, 600.0,
+];
+
 /// LPC synthesis filter state (per-frame).
 #[derive(Clone)]
 pub struct SynthState {
@@ -160,6 +179,28 @@ pub fn conceal_frame(state: &mut SynthState, mode: FrameMode, out: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn polyphaser_bit_exact() {
+        // Verbatim RFC 3951 Appendix A.8 endpoints.
+        assert_eq!(POLYPHASER_TBL.len(), 28);
+        assert_eq!(POLYPHASER_TBL[0], 0.000000);
+        assert_eq!(POLYPHASER_TBL[3], 1.000000);
+        assert_eq!(POLYPHASER_TBL[16], 0.601563);
+        assert_eq!(POLYPHASER_TBL[17], 0.601563);
+        assert_eq!(POLYPHASER_TBL[27], -0.018799);
+    }
+
+    #[test]
+    fn enh_plocs_bit_exact() {
+        assert_eq!(ENH_PLOCS_TBL.len(), 8);
+        assert_eq!(ENH_PLOCS_TBL[0], 40.0);
+        assert_eq!(ENH_PLOCS_TBL[7], 600.0);
+        // Spacing must be exactly 80 samples.
+        for k in 1..ENH_PLOCS_TBL.len() {
+            assert_eq!(ENH_PLOCS_TBL[k] - ENH_PLOCS_TBL[k - 1], 80.0);
+        }
+    }
 
     #[test]
     fn synthesise_zero_excitation_zero_output() {
