@@ -70,22 +70,104 @@ pub fn dequant_shape(state_samples: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-/// All-pass (phase-compensation) filter — a minimal proxy for the
-/// RFC's `Pk(z) = A~rk(z) / A~k(z)`. A true implementation would
-/// convolve the reversed LPC with the forward LPC; for a first-cut
-/// decoder we apply a very mild first-order all-pass which preserves
-/// the magnitude spectrum while undoing most of the group-delay
-/// distortion introduced by the encoder. This is a documented
-/// simplification.
-pub fn allpass_filter(samples: &[f32], a: &[f32]) -> Vec<f32> {
-    let _ = a;
-    // Pass-through identity: the phase distortion our simplified encoder
-    // path does not introduce is not compensated here either. Keeping
-    // the interface stable so a spec-complete replacement can swap in.
-    samples.to_vec()
+/// Circular convolution with the RFC 3951 all-pass `Pk(z) = A~rk(z)/A~k(z)`.
+///
+/// `input` has length `2·N`, the first `N` samples are the time-reversed
+/// scaled shape and the remaining `N` are zeros (per §4.2). `a` is the
+/// LPC denominator `[1, a1..a_order]`. The filter is applied as:
+///
+/// ```text
+///     numerator(z) = z^{-order} + Σ a_{k+1} z^{k - (order-1)}
+///                  = reverse(a[1..=order]) followed by a[0] = 1
+///
+///     fout = AllZero(input, numerator) followed by AllPole(·, a)
+/// ```
+///
+/// This matches the reference `ZeroPoleFilter` chain used by the
+/// encoder's `StateSearchW` and the decoder's `StateConstructW`
+/// (RFC 3951 Appendix A.18/A.44).
+pub fn allpass_zero_pole(input: &[f32], a: &[f32]) -> Vec<f32> {
+    let order = a.len() - 1;
+    debug_assert!(order > 0, "LPC order must be >= 1");
+    debug_assert!(a[0].is_finite());
+
+    // numerator[k] = a[order - k] for k=0..order-1, numerator[order] = a[0].
+    // With a[0] = 1.0 this is `reverse(a[1..=order])` followed by 1.0.
+    let mut numerator = vec![0.0f32; order + 1];
+    for k in 0..order {
+        numerator[k] = a[order - k];
+    }
+    numerator[order] = a[0];
+
+    let len = input.len();
+    let mut out = vec![0.0f32; len];
+
+    // AllZeroFilter: out[n] = Σ_{k=0..=order} numerator[k] * input[n-k],
+    // with zero history before n=0.
+    for n in 0..len {
+        let mut s = numerator[0] * input[n];
+        for k in 1..=order {
+            let idx = n as isize - k as isize;
+            if idx >= 0 {
+                s += numerator[k] * input[idx as usize];
+            }
+        }
+        out[n] = s;
+    }
+
+    // AllPoleFilter in place: out[n] -= Σ_{k=1..=order} a[k] * out[n-k].
+    for n in 0..len {
+        for k in 1..=order {
+            let idx = n as isize - k as isize;
+            if idx >= 0 {
+                out[n] -= a[k] * out[idx as usize];
+            }
+        }
+    }
+
+    out
+}
+
+/// Apply the circular all-pass phase-compensation filter from
+/// RFC 3951 §3.5.2 / §4.2.
+///
+/// Expects `shape` of length `N` (the inverse-scaled, time-reversed
+/// shape vector from the dequantiser) and the order-10 LPC
+/// `a = [1, a1..a10]` taken from the block where the start state
+/// begins.
+///
+/// Returns a length-`N` vector `out` such that
+///
+/// ```text
+///     out(k) = fout(N-1-k) + fout(2N-1-k),  k = 0..N-1
+/// ```
+///
+/// where `fout = Pk(z) · [shape | zeros(N)]` (RFC §4.2 closing
+/// equations). The caller is responsible for applying the final
+/// outer time-reverse around this whole call to recover the
+/// start-state sample order.
+pub fn allpass_filter(shape: &[f32], a: &[f32]) -> Vec<f32> {
+    let n = shape.len();
+    // Build the 2N input: first half = shape, second half = zeros.
+    let mut padded = vec![0.0f32; 2 * n];
+    padded[..n].copy_from_slice(shape);
+    let fout = allpass_zero_pole(&padded, a);
+
+    // Fold: out(k) = fout(N-1-k) + fout(2N-1-k).
+    let mut out = vec![0.0f32; n];
+    for k in 0..n {
+        out[k] = fout[n - 1 - k] + fout[2 * n - 1 - k];
+    }
+    out
 }
 
 /// Reconstruct the scalar-coded portion of the start state.
+///
+/// Mirrors `StateConstructW` (RFC 3951 Appendix A.44):
+///   1. `tmp[k] = (1/scal) · state_sq3Tbl[idxVec[N-1-k]]`  (time-reverse + scale)
+///   2. Pad with `N` zeros to length `2N`.
+///   3. Filter with the zero-pole all-pass using the block's LPC.
+///   4. `out[k] = fout[N-1-k] + fout[2N-1-k]`.
 ///
 /// Returns a vector of length `mode.state_short_len()` (57 or 58).
 pub fn reconstruct_scalar_state(
@@ -96,17 +178,19 @@ pub fn reconstruct_scalar_state(
 ) -> Vec<f32> {
     debug_assert_eq!(state_samples.len(), mode.state_short_len());
     let inv_scal = decode_scale(scale_idx);
-    let shape = dequant_shape(state_samples);
-    // Apply inverse scale.
-    let mut scaled: Vec<f32> = shape.iter().map(|&x| x * inv_scal).collect();
-    // Time-reverse.
-    scaled.reverse();
-    // All-pass filter (phase compensation).
-    let filt = allpass_filter(&scaled, a_for_phase);
-    // Time-reverse again.
-    let mut out = filt;
-    out.reverse();
-    out
+    let n = state_samples.len();
+
+    // Build `in(0..N-1)` = time-reversed (scaled) shape.
+    let mut reversed_scaled = vec![0.0f32; n];
+    for k in 0..n {
+        let tmpi = n - 1 - k;
+        let idx = (state_samples[tmpi] & 0x7) as usize;
+        reversed_scaled[k] = inv_scal * STATE_SQ3_TBL[idx];
+    }
+
+    // Apply the all-pass / fold. `allpass_filter` handles the zero
+    // padding and the `out(k) = f(N-1-k) + f(2N-1-k)` fold.
+    allpass_filter(&reversed_scaled, a_for_phase)
 }
 
 #[cfg(test)]
@@ -161,7 +245,10 @@ mod tests {
     #[test]
     fn reconstruct_20ms_len() {
         let samples = vec![4u8; 57];
-        let v = reconstruct_scalar_state(FrameMode::Ms20, 20, &samples, &[1.0, 0.0]);
+        // Full-order LPC, trivial except for a[0]=1.0 (guaranteed stable).
+        let mut a = [0.0f32; 11];
+        a[0] = 1.0;
+        let v = reconstruct_scalar_state(FrameMode::Ms20, 20, &samples, &a);
         assert_eq!(v.len(), 57);
         for &x in &v {
             assert!(x.is_finite());
@@ -171,7 +258,46 @@ mod tests {
     #[test]
     fn reconstruct_30ms_len() {
         let samples = vec![4u8; 58];
-        let v = reconstruct_scalar_state(FrameMode::Ms30, 20, &samples, &[1.0, 0.0]);
+        let mut a = [0.0f32; 11];
+        a[0] = 1.0;
+        let v = reconstruct_scalar_state(FrameMode::Ms30, 20, &samples, &a);
         assert_eq!(v.len(), 58);
+    }
+
+    #[test]
+    fn allpass_identity_with_trivial_lpc() {
+        // With a = [1, 0, ..., 0] the numerator is the reversed kernel
+        // [0, ..., 0, 1] = z^{-order}, so the all-pass has unity gain at
+        // DC but delays by `order`. The fold `out[k] = fout[N-1-k] +
+        // fout[2N-1-k]` with fout = delayed(input | zeros) yields a
+        // predictable pattern; just verify finiteness and energy bound.
+        let mut a = [0.0f32; 11];
+        a[0] = 1.0;
+        let shape: Vec<f32> = (0..57).map(|i| ((i as f32) * 0.1).sin()).collect();
+        let out = allpass_filter(&shape, &a);
+        assert_eq!(out.len(), shape.len());
+        let e_in: f32 = shape.iter().map(|v| v * v).sum();
+        let e_out: f32 = out.iter().map(|v| v * v).sum();
+        // Energy should be in the same order of magnitude (pure delay
+        // filter is lossless up to boundary effects).
+        assert!(e_out > 0.0);
+        assert!(e_out < 4.0 * e_in + 1.0);
+    }
+
+    #[test]
+    fn allpass_zero_pole_stable_output() {
+        // RFC-shaped LPC: moderate short-term predictor.
+        let mut a = [0.0f32; 11];
+        a[0] = 1.0;
+        a[1] = -0.6;
+        a[2] = 0.15;
+        a[3] = -0.03;
+        let inp: Vec<f32> = (0..100).map(|i| (i as f32).sin()).collect();
+        let out = allpass_zero_pole(&inp, &a);
+        assert_eq!(out.len(), inp.len());
+        for &v in &out {
+            assert!(v.is_finite());
+            assert!(v.abs() < 1e6);
+        }
     }
 }
