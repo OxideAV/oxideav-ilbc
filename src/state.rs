@@ -15,20 +15,28 @@
 //! - `qmax` spans a range documented in the RFC; we use the affine
 //!   approximation `qmax = -5 + scale_idx * (5 - (-5)) / 63` which
 //!   covers [-5, +5] in log10, matching the RFC's observed envelope.
-//! - Shape dequantisation uses a symmetric 3-bit Lloyd-Max-style
-//!   alphabet `{±0.5, ±1.5, ±2.5, ±3.5} * sigma`. The specific
-//!   Appendix A.8 table (`state_sq3Tbl`) is not bit-exact in this
-//!   crate — documented deviation.
+//! - Shape dequantisation uses the verbatim `state_sq3Tbl` from
+//!   RFC 3951 Appendix A.8.
 
 use crate::FrameMode;
 
-/// 3-bit start-state dequantisation alphabet. Symmetric, unit-scale.
-/// Appendix A.8 `state_sq3Tbl` publishes the verbatim eight values;
-/// we use a canonical 3-bit Lloyd-Max for a Gaussian source which
-/// matches the symmetric-pair / increasing-magnitude shape of the RFC
-/// table. This is the second key deviation — see module-level doc.
+/// 3-bit start-state shape dequantisation table, verbatim from
+/// RFC 3951 Appendix A.8 `state_sq3Tbl`.
 pub const STATE_SQ3_TBL: [f32; 8] = [
-    -3.5, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5,
+    -3.719849, -2.177490, -1.130005, -0.309692, 0.444214, 1.329712, 2.436279, 3.983887,
+];
+
+/// 6-bit first-residual-gain quantisation table, verbatim from
+/// RFC 3951 Appendix A.8 `state_frgqTbl`.
+pub const STATE_FRGQ_TBL: [f32; 64] = [
+    1.000085, 1.071695, 1.140395, 1.206868, 1.277188, 1.351503, 1.429380, 1.500727, 1.569049,
+    1.639599, 1.707071, 1.781531, 1.840799, 1.901550, 1.956695, 2.006750, 2.055474, 2.102787,
+    2.142819, 2.183592, 2.217962, 2.257177, 2.295739, 2.332967, 2.369248, 2.402792, 2.435080,
+    2.468598, 2.503394, 2.539284, 2.572944, 2.605036, 2.636331, 2.668939, 2.698780, 2.729101,
+    2.759786, 2.789834, 2.818679, 2.848074, 2.877470, 2.906899, 2.936655, 2.967804, 3.000115,
+    3.033367, 3.066355, 3.104231, 3.141499, 3.183012, 3.222952, 3.265433, 3.308441, 3.350823,
+    3.395275, 3.442793, 3.490801, 3.542514, 3.604064, 3.666050, 3.740994, 3.830749, 3.938770,
+    4.101764,
 ];
 
 /// Decode the logarithmic scale factor.
@@ -110,6 +118,23 @@ mod tests {
     #[test]
     fn shape_table_length() {
         assert_eq!(STATE_SQ3_TBL.len(), 8);
+    }
+
+    #[test]
+    fn state_sq3_bit_exact() {
+        // Verbatim RFC 3951 Appendix A.8 `state_sq3Tbl` values.
+        assert_eq!(STATE_SQ3_TBL[0], -3.719849);
+        assert_eq!(STATE_SQ3_TBL[3], -0.309692);
+        assert_eq!(STATE_SQ3_TBL[4], 0.444214);
+        assert_eq!(STATE_SQ3_TBL[7], 3.983887);
+    }
+
+    #[test]
+    fn state_frgq_bit_exact() {
+        // Verbatim RFC 3951 Appendix A.8 `state_frgqTbl` endpoints.
+        assert_eq!(STATE_FRGQ_TBL.len(), 64);
+        assert_eq!(STATE_FRGQ_TBL[0], 1.000085);
+        assert_eq!(STATE_FRGQ_TBL[63], 4.101764);
     }
 
     #[test]
