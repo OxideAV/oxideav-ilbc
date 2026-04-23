@@ -9,17 +9,33 @@
 //!     cbvec = gain[0]*cbvec[0] + gain[1]*cbvec[1] + gain[2]*cbvec[2]
 //! ```
 //!
-//! Each stage's index picks a segment from the codebook memory (with
-//! filter / interpolation variants per §3.6.3). Gains are successively-
-//! rescaled — stage k's gain is quantised relative to stage k-1's
-//! dequantised value.
+//! Each stage's index picks a segment from the codebook memory. The
+//! codebook layout for a `cbveclen`-sample target has four regions
+//! (RFC §3.6.3 and the reference `getCBvec` in Appendix A.24):
 //!
-//! This module implements the decoder-side construction. It uses a
-//! simplified base codebook that takes contiguous windows out of the
-//! memory buffer, which is the common case for iLBC — augmented / bit-
-//! reversed codebooks (§3.6.3.2 / §3.6.3.3) are not exercised.
+//! - **Base codebook**: `lMem - cbveclen + 1` vectors, one per starting
+//!   position in the memory buffer.
+//! - **Augmented base** (only when `cbveclen == SUBL`): 20 vectors,
+//!   indices `base_size - cbveclen/2 .. base_size`, built by the linear
+//!   interpolation described in §3.6.3.3 (with the 5-sample `pi`/`po`
+//!   blend weights `[0.0, 0.2, 0.4, 0.6, 0.8]`).
+//! - **Expanded codebook**: `lMem - cbveclen + 1` vectors produced by
+//!   filtering the memory buffer with the 8-tap `cbfiltersTbl`
+//!   (§3.6.3.2).
+//! - **Augmented expanded** (only when `cbveclen == SUBL`): 20 vectors
+//!   analogous to the augmented-base, but built from the filtered
+//!   memory.
+//!
+//! Gains are successively-rescaled — stage k's gain is quantised
+//! relative to stage k-1's dequantised value.
 
 use crate::{CB_LMEM, SUBL};
+
+/// Length of the 8-tap `cbfiltersTbl`, per §3.6.3.2.
+const CB_FILTERLEN: usize = 8;
+/// Half the filter length — used to offset the filtered output so that
+/// the expansion compensates for the filter's group delay.
+const CB_HALFFILTERLEN: usize = CB_FILTERLEN / 2;
 
 /// Successive-rescale gain dequantisation (RFC 3951 §3.6.4.2).
 ///
@@ -45,9 +61,10 @@ pub const GAIN_SQ3_TBL: [f32; 8] = [
 
 /// CB expansion filter — verbatim from RFC 3951 Appendix A.8
 /// `cbfiltersTbl` (8 taps). Used by the codebook expansion procedure
-/// of §3.6.3 when the index selects the augmented region of the
-/// adaptive codebook memory. Not yet wired into `extract_cbvec`.
-pub const CB_FILTERS_TBL: [f32; 8] = [
+/// of §3.6.3 when the index selects the expanded region of the
+/// adaptive codebook memory. The reference `getCBvec` consumes this
+/// table tail-first (`pp1 = &cbfiltersTbl[CB_FILTERLEN-1]; pp1--`).
+pub const CB_FILTERS_TBL: [f32; CB_FILTERLEN] = [
     -0.034180, 0.108887, -0.184326, 0.806152, 0.713379, -0.144043, 0.083740, -0.033691,
 ];
 
@@ -71,20 +88,158 @@ pub fn decode_gains(indices: &[u8; 3]) -> [f32; 3] {
     [g0, g1, g2]
 }
 
-/// Extract a 40-sample codebook vector from the 147-sample adaptive
-/// codebook memory.
+/// Construct the augmented codebook vector corresponding to a given
+/// sample delay `index` (20..=39), taken from the tail of `mem`.
 ///
-/// The `index` is 7 or 8 bits; the number of base-codebook positions is
-/// `CB_LMEM - SUBL + 1 = 108`. Indices beyond that (108..255) would
-/// normally select augmented / expanded codebooks per §3.6.3; we wrap
-/// them modulo the base range.
-pub fn extract_cbvec(cb_mem: &[f32; CB_LMEM], index: u16) -> [f32; SUBL] {
-    let base_positions = CB_LMEM - SUBL + 1; // 108
-    let pos = (index as usize) % base_positions;
-    let mut out = [0.0f32; SUBL];
-    for n in 0..SUBL {
-        out[n] = cb_mem[pos + n];
+/// Mirrors `createAugmentedVec` (RFC 3951 Appendix A.12):
+///   1. Copy `index` samples from `mem[lMem-index..]` to `cbvec[0..index]`.
+///   2. Interpolate the next 5 samples between `mem[lMem-5..]` (`po`)
+///      and `mem[lMem-index-5..]` (`pi`) with blend weights
+///      `[0.0, 0.2, 0.4, 0.6, 0.8]` for `pi`.
+///   3. Copy the final `SUBL-index` samples again from
+///      `mem[lMem-index..]`.
+pub(crate) fn create_augmented_vec(
+    mem: &[f32],
+    lmem: usize,
+    index: usize,
+    cbvec: &mut [f32; SUBL],
+) {
+    debug_assert!((20..=39).contains(&index));
+    let ilow = index - 5;
+
+    // Copy first non-interpolated part (length `index`).
+    let pp_start = lmem - index;
+    for j in 0..index {
+        cbvec[j] = mem[pp_start + j];
     }
+
+    // Interpolation: 5 samples, indices ilow..index.
+    let alfa1 = 0.2_f32;
+    let mut alfa = 0.0_f32;
+    let ppo_start = lmem - 5;
+    let ppi_start = lmem - index - 5;
+    for j in ilow..index {
+        let ppo = mem[ppo_start + (j - ilow)];
+        let ppi = mem[ppi_start + (j - ilow)];
+        cbvec[j] = (1.0 - alfa) * ppo + alfa * ppi;
+        alfa += alfa1;
+    }
+
+    // Copy second non-interpolated part (length SUBL - index).
+    for j in 0..(SUBL - index) {
+        cbvec[index + j] = mem[pp_start + j];
+    }
+}
+
+/// Apply the 8-tap `cbfiltersTbl` FIR filter to the codebook memory
+/// buffer, producing a filtered version the expanded codebook section
+/// is drawn from. Matches the reference `getCBvec` inner convolution:
+///
+/// ```text
+///     tempbuff2 = [0] * CB_HALFFILTERLEN || mem || [0] * (CB_HALFFILTERLEN + 1)
+///     for n in 0..lMem + CB_HALFFILTERLEN:
+///         out[n] = Σ_{j=0..CB_FILTERLEN} tempbuff2[n + j] * cbfiltersTbl[CB_FILTERLEN-1-j]
+/// ```
+///
+/// Returns a length-`lMem` buffer aligned to the original memory
+/// (the filter's group delay of 4 samples is compensated).
+fn filter_cb_memory(mem: &[f32]) -> Vec<f32> {
+    let lmem = mem.len();
+    let pad = CB_HALFFILTERLEN;
+    let total = lmem + CB_FILTERLEN; // pad + mem + (pad+1), we only need `lmem` outputs
+
+    // Build padded buffer: CB_HALFFILTERLEN zeros, then mem, then tail.
+    let mut padded = vec![0.0f32; total + 1];
+    for i in 0..lmem {
+        padded[pad + i] = mem[i];
+    }
+
+    // Convolve: out[n] = Σ_{j=0..CB_FILTERLEN} padded[n + j] * tbl[CB_FILTERLEN-1-j]
+    // which with tbl[CB_FILTERLEN-1-j] traversal is exactly the reference
+    // loop (pp1 decrementing from &cbfiltersTbl[CB_FILTERLEN-1]).
+    let mut out = vec![0.0f32; lmem];
+    for n in 0..lmem {
+        let mut s = 0.0f32;
+        for j in 0..CB_FILTERLEN {
+            s += padded[n + j] * CB_FILTERS_TBL[CB_FILTERLEN - 1 - j];
+        }
+        out[n] = s;
+    }
+    out
+}
+
+/// Extract a codebook vector of length `cbveclen` from the `lMem`-sample
+/// adaptive codebook memory, for the given codebook `index`.
+///
+/// Implements the full four-region layout from RFC 3951 §3.6.3 and
+/// Appendix A.24 (`getCBvec`): base codebook, augmented base (only when
+/// `cbveclen == SUBL`), expanded codebook (FIR-filtered memory),
+/// augmented expanded. Indices beyond the legal range wrap modulo the
+/// total codebook size, preserving the previous behaviour for malformed
+/// packets.
+pub fn extract_cbvec_veclen(cb_mem: &[f32], index: u16, cbveclen: usize) -> Vec<f32> {
+    let lmem = cb_mem.len();
+    let base_size_no_aug = lmem - cbveclen + 1;
+    let base_size = if cbveclen == SUBL {
+        base_size_no_aug + cbveclen / 2
+    } else {
+        base_size_no_aug
+    };
+    // Total codebook size: base + expanded (same layout for expanded).
+    let total_size = 2 * base_size;
+    let index = (index as usize) % total_size;
+
+    let mut cbvec = vec![0.0f32; cbveclen];
+
+    if index < base_size_no_aug {
+        // Region 1: base, non-interpolated. `k = index + cbveclen`,
+        // vector = mem[lMem-k .. lMem-k+cbveclen].
+        let k = index + cbveclen;
+        let start = lmem - k;
+        cbvec[..cbveclen].copy_from_slice(&cb_mem[start..start + cbveclen]);
+    } else if index < base_size {
+        // Region 2: augmented base (only when cbveclen == SUBL).
+        // index in [base_size_no_aug .. base_size_no_aug + cbveclen/2).
+        // Per the reference: k = 2*(index - base_size_no_aug) + cbveclen,
+        // then ihigh = k/2 which is the augmented-vector "index"
+        // parameter in createAugmentedVec (20..39).
+        let k = 2 * (index - base_size_no_aug) + cbveclen;
+        let aug_idx = k / 2; // 20..=39 when cbveclen == 40.
+        let mut out_arr = [0.0f32; SUBL];
+        // The reference carves the augmented region out of `mem`
+        // directly; the `buffer` parameter of createAugmentedVec is
+        // `mem + lMem`. We pass `lmem` as the length sentinel.
+        create_augmented_vec(cb_mem, lmem, aug_idx, &mut out_arr);
+        cbvec[..cbveclen].copy_from_slice(&out_arr[..cbveclen]);
+    } else {
+        // Regions 3-4: expanded (filtered) codebook.
+        let filtered = filter_cb_memory(cb_mem);
+        let sub_idx = index - base_size;
+        if sub_idx < base_size_no_aug {
+            // Region 3: expanded base, non-interpolated.
+            let k = sub_idx + cbveclen;
+            let start = lmem - k;
+            cbvec[..cbveclen].copy_from_slice(&filtered[start..start + cbveclen]);
+        } else {
+            // Region 4: augmented expanded.
+            let k = 2 * (sub_idx - base_size_no_aug) + cbveclen;
+            let aug_idx = k / 2;
+            let mut out_arr = [0.0f32; SUBL];
+            create_augmented_vec(&filtered, lmem, aug_idx, &mut out_arr);
+            cbvec[..cbveclen].copy_from_slice(&out_arr[..cbveclen]);
+        }
+    }
+
+    cbvec
+}
+
+/// Extract a 40-sample codebook vector from the 147-sample adaptive
+/// codebook memory, using the four-region layout of §3.6.3
+/// (base / augmented base / expanded / augmented expanded).
+pub fn extract_cbvec(cb_mem: &[f32; CB_LMEM], index: u16) -> [f32; SUBL] {
+    let v = extract_cbvec_veclen(cb_mem, index, SUBL);
+    let mut out = [0.0f32; SUBL];
+    out.copy_from_slice(&v);
     out
 }
 
@@ -168,13 +323,103 @@ mod tests {
 
     #[test]
     fn extract_cbvec_inside_mem() {
+        // With cbveclen == SUBL == 40 and lMem == 147:
+        //   base_size_no_aug = 108, base_size = 128, total = 256.
+        // Index 10 is in the base region. Reference formula:
+        //   k = index + cbveclen = 50, start = lMem - k = 97.
+        //   cbvec[j] = mem[97 + j], i.e. 97..137.
         let mut mem = [0.0f32; CB_LMEM];
         for i in 0..CB_LMEM {
             mem[i] = i as f32;
         }
         let v = extract_cbvec(&mem, 10);
-        assert_eq!(v[0], 10.0);
-        assert_eq!(v[SUBL - 1], 10.0 + (SUBL as f32) - 1.0);
+        assert_eq!(v[0], 97.0);
+        assert_eq!(v[SUBL - 1], 97.0 + (SUBL as f32) - 1.0);
+    }
+
+    #[test]
+    fn extract_cbvec_augmented_base() {
+        // Augmented base region begins at index 108 (base_size_no_aug).
+        // Index 108 -> aug_idx = (2*0 + 40)/2 = 20.
+        let mut mem = [0.0f32; CB_LMEM];
+        for i in 0..CB_LMEM {
+            mem[i] = i as f32;
+        }
+        let v_aug = extract_cbvec(&mem, 108);
+        // Region layout for aug_idx=20:
+        //   j in [0..15): mem[127..142] (first non-interpolated part)
+        //   j in [15..20): interpolation between mem[142..147] (po) and
+        //                  mem[122..127] (pi) with pi weights
+        //                  [0.0, 0.2, 0.4, 0.6, 0.8].
+        //   j in [20..40): mem[127..147] (second non-interpolated part)
+        for j in 0..15 {
+            assert_eq!(v_aug[j], 127.0 + j as f32);
+        }
+        let pi_w = [0.0_f32, 0.2, 0.4, 0.6, 0.8];
+        for k in 0..5 {
+            let expected = (1.0 - pi_w[k]) * (142.0 + k as f32)
+                + pi_w[k] * (122.0 + k as f32);
+            let got = v_aug[15 + k];
+            assert!(
+                (got - expected).abs() < 1e-4,
+                "aug-base j={} got {} want {}",
+                15 + k,
+                got,
+                expected
+            );
+        }
+        for j in 0..20 {
+            assert_eq!(v_aug[20 + j], 127.0 + j as f32);
+        }
+    }
+
+    #[test]
+    fn extract_cbvec_augmented_near_top() {
+        // Augmented base index 127 -> last augmented vector, aug_idx = 39.
+        let mem: [f32; CB_LMEM] = core::array::from_fn(|i| i as f32);
+        let v = extract_cbvec(&mem, 127);
+        // For aug_idx=39: first non-interpolated part has 39 samples
+        // (j=0..34 is the plain copy; j=34..39 is interpolated).
+        for j in 0..34 {
+            assert_eq!(v[j], (CB_LMEM - 39) as f32 + j as f32);
+        }
+        // Last sample (SUBL - 39 = 1) comes from mem[lMem - 39] = mem[108].
+        assert_eq!(v[39], (CB_LMEM - 39) as f32);
+    }
+
+    #[test]
+    fn extract_cbvec_expanded_base() {
+        // base_size = 128, so index 128 starts the expanded region.
+        // The expanded codebook is FIR-filtered memory, so values will
+        // differ from plain mem — just check it's finite and bounded.
+        let mem: [f32; CB_LMEM] = core::array::from_fn(|i| (i as f32 * 0.1).sin());
+        let v = extract_cbvec(&mem, 128);
+        for &x in v.iter() {
+            assert!(x.is_finite());
+            assert!(x.abs() < 10.0);
+        }
+    }
+
+    #[test]
+    fn create_augmented_vec_interpolation_weights() {
+        // Sanity: interpolated region blends pi/po with weights
+        // [0.0, 0.2, 0.4, 0.6, 0.8]. With po == 1.0 and pi == 0.0,
+        // cbvec[ilow..index] should equal those weights.
+        let lmem = CB_LMEM;
+        let mut mem = [0.0f32; CB_LMEM];
+        // Set the last 5 "po" samples to 1.0; leave "pi" samples 0.
+        for i in (lmem - 5)..lmem {
+            mem[i] = 1.0;
+        }
+        let index = 25;
+        let mut out = [0.0f32; SUBL];
+        create_augmented_vec(&mem, lmem, index, &mut out);
+        // Positions ilow..index are the interpolated slots.
+        let expected = [0.0_f32, 0.2, 0.4, 0.6, 0.8];
+        for k in 0..5 {
+            let v = out[index - 5 + k];
+            assert!((v - (1.0 - expected[k])).abs() < 1e-5);
+        }
     }
 
     #[test]
