@@ -40,10 +40,14 @@ pub mod bitreader;
 pub mod cb;
 pub mod codec;
 pub mod decoder;
+pub mod encoder;
 pub mod enhancer;
+pub mod lpc_analysis;
 pub mod lsf;
+pub mod lsf_quant;
 pub mod lsf_tables;
 pub mod state;
+pub mod state_encode;
 pub mod synthesis;
 
 use oxideav_codec::CodecRegistry;
