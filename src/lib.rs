@@ -37,6 +37,7 @@
 )]
 
 pub mod bitreader;
+pub mod bitwriter;
 pub mod cb;
 pub mod cb_search;
 pub mod codec;
