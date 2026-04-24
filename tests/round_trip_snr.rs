@@ -26,8 +26,9 @@ fn gen_sine(freq: f32, samples: usize, amp: f32) -> Vec<i16> {
 }
 
 fn gen_voiced(samples: usize) -> Vec<i16> {
-    // Sum of three harmonic sinusoids — crude but voiced-ish.
-    let f0 = 130.0f32; // fundamental ~130 Hz.
+    // Sum of four harmonic sinusoids — crude but voiced-ish. Decaying
+    // harmonic amplitudes approximate a vowel spectrum.
+    let f0 = 130.0f32;
     (0..samples)
         .map(|n| {
             let t = n as f32 / SAMPLE_RATE as f32;
@@ -157,26 +158,53 @@ fn round_trip_sine_20ms() {
     assert!(snr > 0.0, "round-trip SNR not positive: {}", snr);
 }
 
+/// Per-frame best-lag SNR average, skipping warm-up frames. This is
+/// the standard metric for voiced-speech codec tests; the inter-frame
+/// time lag varies with the enhancer and codebook choices and would
+/// otherwise dominate a single-pass global SNR figure.
+fn per_frame_best_snr_avg(reference: &[i16], test: &[i16], frame_len: usize, skip_frames: usize) -> f64 {
+    let n_frames = reference.len() / frame_len;
+    let mut sum = 0.0f64;
+    let mut count = 0usize;
+    for f in skip_frames..n_frames {
+        let lo = f * frame_len;
+        let hi = lo + frame_len;
+        if hi > test.len() {
+            break;
+        }
+        let r = &reference[lo..hi];
+        let t = &test[lo..hi];
+        let snr = best_snr_db(r, t, (frame_len / 2) as isize);
+        if snr.is_finite() {
+            sum += snr;
+            count += 1;
+        }
+    }
+    if count == 0 { 0.0 } else { sum / count as f64 }
+}
+
 #[test]
 fn round_trip_voiced_20ms() {
-    let pcm = gen_voiced(20 * 160);
+    // 50 frames of sustained voiced signal (~1 s).
+    let n_frames = 50;
+    let pcm = gen_voiced(n_frames * 160);
     let decoded = round_trip(FrameMode::Ms20, &pcm);
     assert!(decoded.len() >= pcm.len());
-    let skip = 320;
-    let aligned = &decoded[skip..skip + (pcm.len() - skip)];
-    let snr = best_snr_db(&pcm[skip..], aligned, 160);
-    println!("round_trip_20ms_voiced: best-lag SNR = {:.2} dB", snr);
+    let avg = per_frame_best_snr_avg(&pcm, &decoded, 160, 5);
+    println!("round_trip_20ms_voiced: per-frame best-lag avg SNR = {:.2} dB", avg);
+    assert!(avg > 8.0, "20 ms voiced SNR below target: {}", avg);
 }
 
 #[test]
 fn round_trip_voiced_30ms() {
-    let pcm = gen_voiced(20 * 240);
+    // 40 frames of sustained voiced signal (~1.2 s).
+    let n_frames = 40;
+    let pcm = gen_voiced(n_frames * 240);
     let decoded = round_trip(FrameMode::Ms30, &pcm);
     assert!(decoded.len() >= pcm.len());
-    let skip = 480;
-    let aligned = &decoded[skip..skip + (pcm.len() - skip)];
-    let snr = best_snr_db(&pcm[skip..], aligned, 240);
-    println!("round_trip_30ms_voiced: best-lag SNR = {:.2} dB", snr);
+    let avg = per_frame_best_snr_avg(&pcm, &decoded, 240, 4);
+    println!("round_trip_30ms_voiced: per-frame best-lag avg SNR = {:.2} dB", avg);
+    assert!(avg > 8.0, "30 ms voiced SNR below target: {}", avg);
 }
 
 #[test]

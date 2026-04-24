@@ -249,7 +249,7 @@ pub fn lpc_to_lsf(a: &[f32; LPC_ORDER + 1]) -> [f32; LPC_ORDER] {
     // LSFs: interleave q, p, q, p, ... starting with Q (lowest root = ω_1).
     // RFC ordering: LSF[0] < LSF[1] < ... < LSF[9], alternating between
     // the two polynomials. We'll just merge and sort, keeping 10 smallest.
-    let mut all: Vec<f64> = p_roots.into_iter().chain(q_roots.into_iter()).collect();
+    let mut all: Vec<f64> = p_roots.into_iter().chain(q_roots).collect();
     all.sort_by(|a, b| a.partial_cmp(b).unwrap());
     // If root-finding was unstable, fall back to LSF_MEAN.
     let mut lsf = [0.0f32; LPC_ORDER];

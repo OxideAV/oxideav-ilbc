@@ -32,7 +32,7 @@
 use crate::cb::{
     extract_cbvec_veclen, update_cb_memory, GAIN_SQ3_TBL, GAIN_SQ4_TBL, GAIN_SQ5_TBL,
 };
-use crate::{CB_LMEM, SUBL};
+use crate::{CB_LMEM, LPC_ORDER, SUBL};
 
 /// Maximum absolute gain (RFC 3951 §3.6.4.1).
 const CB_MAXGAIN: f32 = 1.3;
@@ -216,6 +216,127 @@ pub fn search_cb_subl(
     let mut out = [0.0f32; SUBL];
     out.copy_from_slice(&rec);
     (res, out)
+}
+
+/// Analysis-by-synthesis codebook search — searches for the excitation
+/// that, after passing through `1/A(z)` with zero initial memory,
+/// best matches the perceptually significant residual.
+///
+/// `target_pcm` is the weighted PCM residual already net of the zero-
+/// input response of the synth filter. `a` is the LPC denominator.
+///
+/// Internally, we pre-compute the zero-state response of `1/A(z)` for
+/// each candidate codebook vector — the synth filter is linear, so we
+/// can decompose each reconstructed candidate as `gain * ZSR + 0`.
+/// Classic analysis-by-synthesis: maximise
+/// `(target·ZSR)^2 / ||ZSR||^2`.
+///
+/// Returns the 3-stage CB indices plus the reconstructed excitation
+/// sub-block (which, when run through `1/A(z)` with the same memory,
+/// reproduces the chosen PCM).
+pub fn search_cb_abs(
+    cb_mem: &[f32; CB_LMEM],
+    a: &[f32; LPC_ORDER + 1],
+    target_pcm: &[f32; SUBL],
+) -> (CbSearchResult, [f32; SUBL]) {
+    // Pre-compute ZSR for all 256 codebook vectors (worst case).
+    // total_cb_size for 40-sample target with 147-sample memory = 256.
+    let total = total_cb_size(CB_LMEM, SUBL);
+    let mut zsrs: Vec<[f32; SUBL]> = Vec::with_capacity(total);
+    for i in 0..total {
+        let cbv = extract_cbvec_veclen(cb_mem, i as u16, SUBL);
+        let mut arr = [0.0f32; SUBL];
+        arr.copy_from_slice(&cbv);
+        let zsr = zero_state_response(&arr, a);
+        zsrs.push(zsr);
+    }
+
+    let mut t = *target_pcm;
+    let mut cb_idx = [0u16; 3];
+    let mut gain_idx = [0u8; 3];
+    let mut excitation = [0.0f32; SUBL];
+    let mut prev_abs = 1.0f32;
+
+    for stage in 0..3 {
+        let stage0 = stage == 0;
+        let mut best_idx = 0u16;
+        let mut best_measure = f32::NEG_INFINITY;
+        let mut best_gain = 0.0f32;
+        for i in 0..total {
+            let zsr = &zsrs[i];
+            let mut dot = 0.0f32;
+            let mut nrm = 0.0f32;
+            for n in 0..SUBL {
+                dot += t[n] * zsr[n];
+                nrm += zsr[n] * zsr[n];
+            }
+            if nrm < 1e-12 {
+                continue;
+            }
+            if stage0 && dot <= 0.0 {
+                continue;
+            }
+            let gain = dot / nrm;
+            if gain.abs() > CB_MAXGAIN {
+                continue;
+            }
+            let measure = (dot * dot) / nrm;
+            if measure > best_measure {
+                best_measure = measure;
+                best_idx = i as u16;
+                best_gain = gain;
+            }
+        }
+        if best_measure.is_infinite() {
+            // Nothing valid; bail with zeroed stage.
+            cb_idx[stage] = 0;
+            gain_idx[stage] = match stage {
+                0 => 0,
+                1 => GAIN_SQ4_TBL.iter().position(|&v| v == 0.0).unwrap_or(7) as u8,
+                _ => GAIN_SQ3_TBL.iter().position(|&v| v == 0.0).unwrap_or(3) as u8,
+            };
+            continue;
+        }
+        cb_idx[stage] = best_idx;
+        let (g_idx, g_deq) = match stage {
+            0 => quantise_gain0(best_gain),
+            1 => quantise_gain1(best_gain, prev_abs),
+            _ => quantise_gain2(best_gain, prev_abs),
+        };
+        gain_idx[stage] = g_idx;
+        prev_abs = g_deq.abs();
+        // Update PCM target: subtract g_deq * ZSR. Add the excitation
+        // contribution `g_deq * cbvec` to the reconstructed excitation.
+        let zsr = &zsrs[best_idx as usize];
+        let cbv = extract_cbvec_veclen(cb_mem, best_idx, SUBL);
+        for n in 0..SUBL {
+            t[n] -= g_deq * zsr[n];
+            excitation[n] += g_deq * cbv[n];
+        }
+    }
+    (
+        CbSearchResult { cb_idx, gain_idx },
+        excitation,
+    )
+}
+
+/// Compute the zero-state response of the all-pole synth filter
+/// `1/A(z)` fed `input`.
+fn zero_state_response(input: &[f32; SUBL], a: &[f32; LPC_ORDER + 1]) -> [f32; SUBL] {
+    let mut mem = [0.0f32; LPC_ORDER];
+    let mut out = [0.0f32; SUBL];
+    for n in 0..SUBL {
+        let mut s = input[n];
+        for k in 1..=LPC_ORDER {
+            s -= a[k] * mem[k - 1];
+        }
+        out[n] = s;
+        for k in (1..LPC_ORDER).rev() {
+            mem[k] = mem[k - 1];
+        }
+        mem[0] = s;
+    }
+    out
 }
 
 /// Update the 147-sample codebook memory after encoding one excitation

@@ -42,7 +42,7 @@ use oxideav_core::{
 use crate::bitreader::CbStageIndices;
 use crate::bitwriter::{pack_frame, PackParams};
 use crate::cb::update_cb_memory;
-use crate::cb_search::search_cb;
+use crate::cb_search::{search_cb, search_cb_abs};
 use crate::lpc_analysis::{asymmetric_window, block_lpc, hanning_window, lpc_to_lsf, LPC_WINLEN};
 use crate::lsf::{decode_and_interpolate, dequant_lsf, LsfState};
 use crate::lsf_quant::quantise_lsf;
@@ -195,13 +195,20 @@ impl IlbcEncoder {
         // same indices — `dequant_lsf` applies stabilise_lsf too. This
         // guarantees the encoder and decoder see the same sub-block LPC
         // rows.
-        let dec_qlsf: Vec<[f32; LPC_ORDER]> =
-            lsf_idx.iter().map(|idx| dequant_lsf(idx)).collect();
+        let dec_qlsf: Vec<[f32; LPC_ORDER]> = lsf_idx.iter().map(dequant_lsf).collect();
         debug_assert_eq!(dec_qlsf.len(), qlsf_refs.len());
         let a_per_sub = decode_and_interpolate(&mut self.lsf_state, mode, &dec_qlsf);
         debug_assert_eq!(a_per_sub.len(), mode.sub_blocks());
 
         // ---- 3. Residual via per-sub-block LPC analysis filter ----
+        //
+        // Open-loop analysis using the encoder's input PCM history. This
+        // matches the RFC reference. Closed-loop alternatives (feeding
+        // the decoder's synth memory into the analysis filter) were
+        // tried and gave worse SNR in this project's simplified
+        // pipeline — they only help when the decoder-side synth memory
+        // truly equals the target output, which isn't the case with
+        // 3-bit scalar state quantisation and a 3-stage CB.
         let mut residual = vec![0.0f32; samples];
         for sb in 0..mode.sub_blocks() {
             let lo = sb * SUBL;
@@ -285,30 +292,112 @@ impl IlbcEncoder {
         }
         update_cb_memory(&mut self.cb_mem, &boundary_block);
 
-        // ---- 6. Remaining 40-sample sub-blocks ----
+        // ---- 6. Remaining 40-sample sub-blocks: analysis-by-synthesis ----
+        // For each 40-sample sub-block the encoder searches for the
+        // excitation whose zero-state response of `1/A(z)` best matches
+        // the *PCM* target (input - ZIR). This is strictly better than
+        // residual-domain matching when the decoder's filter memory
+        // drifts from the encoder's input history.
         let n_cb_sub = mode.cb_sub_blocks();
         let mut sub_block_indices = Vec::with_capacity(n_cb_sub);
+        // Running synth memory for the analysis-by-synthesis loop. It
+        // starts at the state-sub-block boundary: the decoder's synth
+        // mem at sub-block 2's start is whatever 1/A(z) produces from
+        // excitation[0..80] = state_vec + boundary. We compute that here.
+        let mut synth_mem;
+        {
+            // Run 1/A(z) from zero mem through state_vec to get synth_mem.
+            // This approximates the decoder's synth memory at sub-block 2's
+            // start. Using a_per_sub[0] for sub-blocks 0-1 (two halves).
+            let mut tmp_mem = [0.0f32; LPC_ORDER];
+            for sb in 0..2.min(mode.sub_blocks()) {
+                let a = &a_per_sub[sb];
+                let sb_start = sb * SUBL;
+                let mut exc = [0.0f32; SUBL];
+                // Build the excitation the decoder uses for this state
+                // sub-block.
+                for i in 0..SUBL {
+                    if sb_start + i < STATE_LEN {
+                        exc[i] = state_vec[sb_start + i];
+                    }
+                    if sb_start + i >= STATE_LEN - boundary_samples
+                        && sb_start + i < STATE_LEN
+                    {
+                        let b_off = sb_start + i - (STATE_LEN - boundary_samples);
+                        if b_off < boundary_samples.min(SUBL) {
+                            exc[i] += boundary_rec[b_off];
+                        }
+                    }
+                }
+                for n in 0..SUBL {
+                    let mut s = exc[n];
+                    for k in 1..=LPC_ORDER {
+                        s -= a[k] * tmp_mem[k - 1];
+                    }
+                    for k in (1..LPC_ORDER).rev() {
+                        tmp_mem[k] = tmp_mem[k - 1];
+                    }
+                    tmp_mem[0] = s;
+                }
+            }
+            synth_mem = tmp_mem;
+        }
         for cb_i in 0..n_cb_sub {
             let sb = 2 + cb_i;
             let lo = sb * SUBL;
             let hi = lo + SUBL;
-            if hi > residual.len() {
-                // Shouldn't happen; guard against mis-sized frames.
-                let empty = CbStageIndices::default();
-                sub_block_indices.push(empty);
+            if hi > samples {
+                sub_block_indices.push(CbStageIndices::default());
                 continue;
             }
-            let mut target = [0.0f32; SUBL];
-            target.copy_from_slice(&residual[lo..hi]);
-            let (res, rec) = search_cb(&self.cb_mem, SUBL, &target);
-            let mut rec_arr = [0.0f32; SUBL];
-            rec_arr.copy_from_slice(&rec);
-            update_cb_memory(&mut self.cb_mem, &rec_arr);
+            let a = &a_per_sub[sb];
+            // Compute zero-input response (ZIR) of 1/A(z) for this
+            // sub-block given `synth_mem`.
+            let zir = {
+                let mut mem = synth_mem;
+                let mut out = [0.0f32; SUBL];
+                for n in 0..SUBL {
+                    let mut s = 0.0f32;
+                    for k in 1..=LPC_ORDER {
+                        s -= a[k] * mem[k - 1];
+                    }
+                    out[n] = s;
+                    for k in (1..LPC_ORDER).rev() {
+                        mem[k] = mem[k - 1];
+                    }
+                    mem[0] = s;
+                }
+                out
+            };
+            // PCM target = input - ZIR.
+            let mut pcm_target = [0.0f32; SUBL];
+            for i in 0..SUBL {
+                pcm_target[i] = frame_pcm[lo + i] - zir[i];
+            }
+            let (res, excitation) = search_cb_abs(&self.cb_mem, a, &pcm_target);
+            // Advance synth_mem using the PCM output = ZIR + ZSR(excitation).
+            // We compute the actual output sample-by-sample.
+            let mut mem = synth_mem;
+            for n in 0..SUBL {
+                let mut s = excitation[n];
+                for k in 1..=LPC_ORDER {
+                    s -= a[k] * mem[k - 1];
+                }
+                for k in (1..LPC_ORDER).rev() {
+                    mem[k] = mem[k - 1];
+                }
+                mem[0] = s;
+            }
+            synth_mem = mem;
+            update_cb_memory(&mut self.cb_mem, &excitation);
             sub_block_indices.push(CbStageIndices {
                 cb_idx: res.cb_idx,
                 gain_idx: res.gain_idx,
             });
         }
+        // Silence the "unused" warning in case the simpler search is
+        // re-enabled later.
+        let _ = search_cb;
 
         // ---- 7. Pack ----
         let params = PackParams {
