@@ -38,6 +38,7 @@
 
 pub mod bitreader;
 pub mod cb;
+pub mod cb_search;
 pub mod codec;
 pub mod decoder;
 pub mod encoder;
