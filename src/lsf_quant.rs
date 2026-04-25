@@ -82,7 +82,12 @@ mod tests {
         // LSF_MEAN should quantise to something close (not exact — the
         // mean isn't necessarily in the codebook).
         for k in 0..LPC_ORDER {
-            assert!((q[k] - LSF_MEAN[k]).abs() < 0.5, "k={k}: {} vs {}", q[k], LSF_MEAN[k]);
+            assert!(
+                (q[k] - LSF_MEAN[k]).abs() < 0.5,
+                "k={k}: {} vs {}",
+                q[k],
+                LSF_MEAN[k]
+            );
         }
     }
 

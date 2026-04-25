@@ -10,7 +10,7 @@
 //!
 //! Frame mode (20 ms / 30 ms) is inferred from the packet byte length.
 
-use oxideav_codec::Decoder;
+use oxideav_core::Decoder;
 use oxideav_core::{
     AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result, SampleFormat, TimeBase,
 };

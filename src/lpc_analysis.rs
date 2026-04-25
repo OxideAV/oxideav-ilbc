@@ -40,7 +40,8 @@ pub fn hanning_window() -> [f32; LPC_WINLEN] {
     // Standard mirrored Hanning over 240 samples.
     let blockl = LPC_WINLEN as f32;
     for i in 0..(LPC_WINLEN / 2) {
-        w[i] = 0.5 * (1.0 - (2.0 * core::f32::consts::PI * (i as f32 + 1.0) / (blockl + 1.0)).cos());
+        w[i] =
+            0.5 * (1.0 - (2.0 * core::f32::consts::PI * (i as f32 + 1.0) / (blockl + 1.0)).cos());
     }
     for i in (LPC_WINLEN / 2)..LPC_WINLEN {
         w[i] = w[LPC_WINLEN - i - 1];

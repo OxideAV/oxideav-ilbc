@@ -8,10 +8,10 @@
 //! at least 5 dB (initial encoder is conservative) while printing the
 //! actual figure for tuning.
 
-use oxideav_codec::{CodecRegistry, Encoder};
 use oxideav_core::{
     AudioFrame, CodecId, CodecOptions, CodecParameters, Frame, Packet, SampleFormat, TimeBase,
 };
+use oxideav_core::{CodecRegistry, Encoder};
 
 use oxideav_ilbc::{FrameMode, CODEC_ID_STR, SAMPLE_RATE};
 
@@ -34,8 +34,8 @@ fn gen_voiced(samples: usize) -> Vec<i16> {
             let t = n as f32 / SAMPLE_RATE as f32;
             let mut v = 0.0f32;
             for h in 1..5 {
-                v += ((2.0 * core::f32::consts::PI * h as f32 * f0 * t).sin())
-                    * (3000.0 / h as f32);
+                v +=
+                    ((2.0 * core::f32::consts::PI * h as f32 * f0 * t).sin()) * (3000.0 / h as f32);
             }
             v.round().clamp(-32768.0, 32767.0) as i16
         })
@@ -83,11 +83,7 @@ fn round_trip(mode: FrameMode, pcm: &[i16]) -> Vec<i16> {
     let mut decoded = Vec::new();
     while let Ok(pkt) = enc.receive_packet() {
         // Feed straight into decoder.
-        let decoder_pkt = Packet::new(
-            0,
-            TimeBase::new(1, SAMPLE_RATE as i64),
-            pkt.data.clone(),
-        );
+        let decoder_pkt = Packet::new(0, TimeBase::new(1, SAMPLE_RATE as i64), pkt.data.clone());
         dec.send_packet(&decoder_pkt).unwrap();
         if let Frame::Audio(a) = dec.receive_frame().unwrap() {
             for chunk in a.data[0].chunks_exact(2) {
@@ -154,7 +150,10 @@ fn round_trip_sine_20ms() {
     let aligned = &decoded[skip..skip + (pcm.len() - skip)];
     let snr = best_snr_db(&pcm[skip..], aligned, 160);
     let snr_aligned = snr_db(&pcm[skip..], aligned);
-    println!("round_trip_20ms_sine: SNR = {:.2} dB (aligned = {:.2} dB)", snr, snr_aligned);
+    println!(
+        "round_trip_20ms_sine: SNR = {:.2} dB (aligned = {:.2} dB)",
+        snr, snr_aligned
+    );
     assert!(snr > 0.0, "round-trip SNR not positive: {}", snr);
 }
 
@@ -162,7 +161,12 @@ fn round_trip_sine_20ms() {
 /// the standard metric for voiced-speech codec tests; the inter-frame
 /// time lag varies with the enhancer and codebook choices and would
 /// otherwise dominate a single-pass global SNR figure.
-fn per_frame_best_snr_avg(reference: &[i16], test: &[i16], frame_len: usize, skip_frames: usize) -> f64 {
+fn per_frame_best_snr_avg(
+    reference: &[i16],
+    test: &[i16],
+    frame_len: usize,
+    skip_frames: usize,
+) -> f64 {
     let n_frames = reference.len() / frame_len;
     let mut sum = 0.0f64;
     let mut count = 0usize;
@@ -180,7 +184,11 @@ fn per_frame_best_snr_avg(reference: &[i16], test: &[i16], frame_len: usize, ski
             count += 1;
         }
     }
-    if count == 0 { 0.0 } else { sum / count as f64 }
+    if count == 0 {
+        0.0
+    } else {
+        sum / count as f64
+    }
 }
 
 #[test]
@@ -191,7 +199,10 @@ fn round_trip_voiced_20ms() {
     let decoded = round_trip(FrameMode::Ms20, &pcm);
     assert!(decoded.len() >= pcm.len());
     let avg = per_frame_best_snr_avg(&pcm, &decoded, 160, 5);
-    println!("round_trip_20ms_voiced: per-frame best-lag avg SNR = {:.2} dB", avg);
+    println!(
+        "round_trip_20ms_voiced: per-frame best-lag avg SNR = {:.2} dB",
+        avg
+    );
     assert!(avg > 8.0, "20 ms voiced SNR below target: {}", avg);
 }
 
@@ -203,7 +214,10 @@ fn round_trip_voiced_30ms() {
     let decoded = round_trip(FrameMode::Ms30, &pcm);
     assert!(decoded.len() >= pcm.len());
     let avg = per_frame_best_snr_avg(&pcm, &decoded, 240, 4);
-    println!("round_trip_30ms_voiced: per-frame best-lag avg SNR = {:.2} dB", avg);
+    println!(
+        "round_trip_30ms_voiced: per-frame best-lag avg SNR = {:.2} dB",
+        avg
+    );
     assert!(avg > 8.0, "30 ms voiced SNR below target: {}", avg);
 }
 

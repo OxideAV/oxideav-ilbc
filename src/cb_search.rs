@@ -29,9 +29,7 @@
 //! For the 22/23-sample boundary block:
 //!   - total = 128, stages 0/1/2 all 7 bits.
 
-use crate::cb::{
-    extract_cbvec_veclen, update_cb_memory, GAIN_SQ3_TBL, GAIN_SQ4_TBL, GAIN_SQ5_TBL,
-};
+use crate::cb::{extract_cbvec_veclen, update_cb_memory, GAIN_SQ3_TBL, GAIN_SQ4_TBL, GAIN_SQ5_TBL};
 use crate::{CB_LMEM, LPC_ORDER, SUBL};
 
 /// Maximum absolute gain (RFC 3951 §3.6.4.1).
@@ -201,10 +199,7 @@ pub fn search_cb(cb_mem: &[f32], cbveclen: usize, target: &[f32]) -> (CbSearchRe
         }
     }
 
-    (
-        CbSearchResult { cb_idx, gain_idx },
-        reconstructed,
-    )
+    (CbSearchResult { cb_idx, gain_idx }, reconstructed)
 }
 
 /// Search a 40-sample sub-block. Convenience wrapper for the main path.
@@ -314,10 +309,7 @@ pub fn search_cb_abs(
             excitation[n] += g_deq * cbv[n];
         }
     }
-    (
-        CbSearchResult { cb_idx, gain_idx },
-        excitation,
-    )
+    (CbSearchResult { cb_idx, gain_idx }, excitation)
 }
 
 /// Compute the zero-state response of the all-pole synth filter
@@ -417,7 +409,12 @@ mod tests {
         // Reconstruction should match the decoder's own construction.
         let dec = construct_excitation(&mem, &res.cb_idx, &res.gain_idx);
         for n in 0..SUBL {
-            assert!((rec[n] - dec[n]).abs() < 1e-3, "n={n}: rec={} dec={}", rec[n], dec[n]);
+            assert!(
+                (rec[n] - dec[n]).abs() < 1e-3,
+                "n={n}: rec={} dec={}",
+                rec[n],
+                dec[n]
+            );
         }
     }
 

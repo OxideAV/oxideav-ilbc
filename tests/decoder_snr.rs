@@ -20,10 +20,10 @@
 //! The second measure is printed rather than asserted — diagnostic
 //! only. Run with `cargo test -- --nocapture decoder_snr`.
 
-use oxideav_codec::CodecRegistry;
+use oxideav_core::CodecRegistry;
 use oxideav_core::{CodecId, CodecParameters, Frame, Packet, SampleFormat, TimeBase};
 
-fn make_dec() -> Box<dyn oxideav_codec::Decoder> {
+fn make_dec() -> Box<dyn oxideav_core::Decoder> {
     let mut reg = CodecRegistry::new();
     oxideav_ilbc::register(&mut reg);
     let mut params = CodecParameters::audio(CodecId::new(oxideav_ilbc::CODEC_ID_STR));

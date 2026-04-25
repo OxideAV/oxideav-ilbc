@@ -34,7 +34,7 @@
 
 use std::collections::VecDeque;
 
-use oxideav_codec::Encoder;
+use oxideav_core::Encoder;
 use oxideav_core::{
     CodecId, CodecParameters, Error, Frame, MediaType, Packet, Result, SampleFormat, TimeBase,
 };
@@ -83,7 +83,11 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     }
 
     // Pick a mode from the `frame_ms` option (20 or 30). Default 20 ms.
-    let mode = match params.options.get("frame_ms").and_then(|v| v.parse::<u32>().ok()) {
+    let mode = match params
+        .options
+        .get("frame_ms")
+        .and_then(|v| v.parse::<u32>().ok())
+    {
         Some(30) => FrameMode::Ms30,
         _ => FrameMode::Ms20,
     };
@@ -241,12 +245,8 @@ impl IlbcEncoder {
             .collect();
 
         // The reconstructed scalar state the decoder will produce.
-        let scalar_state = crate::state::reconstruct_scalar_state(
-            mode,
-            scale_idx,
-            &state_samples,
-            &a_for_phase,
-        );
+        let scalar_state =
+            crate::state::reconstruct_scalar_state(mode, scale_idx, &state_samples, &a_for_phase);
         // The decoder seeds the 80-sample state vector with the scalar
         // state at indices 0..STATE_SHORT_LEN, leaving the boundary span
         // (STATE_SHORT_LEN..80) to be filled by the boundary CB search.
@@ -320,9 +320,7 @@ impl IlbcEncoder {
                     if sb_start + i < STATE_LEN {
                         exc[i] = state_vec[sb_start + i];
                     }
-                    if sb_start + i >= STATE_LEN - boundary_samples
-                        && sb_start + i < STATE_LEN
-                    {
+                    if sb_start + i >= STATE_LEN - boundary_samples && sb_start + i < STATE_LEN {
                         let b_off = sb_start + i - (STATE_LEN - boundary_samples);
                         if b_off < boundary_samples.min(SUBL) {
                             exc[i] += boundary_rec[b_off];
@@ -495,7 +493,9 @@ impl Encoder for IlbcEncoder {
             return Err(Error::invalid("iLBC encoder: input must be mono, 8000 Hz"));
         }
         if af.format != SampleFormat::S16 {
-            return Err(Error::invalid("iLBC encoder: input sample format must be S16"));
+            return Err(Error::invalid(
+                "iLBC encoder: input sample format must be S16",
+            ));
         }
         let bytes = af
             .data
@@ -526,7 +526,7 @@ impl Encoder for IlbcEncoder {
 
 /// Register the iLBC encoder with the codec registry. Called from
 /// [`crate::codec::register`] once wired.
-pub fn register_encoder(info: oxideav_codec::CodecInfo) -> oxideav_codec::CodecInfo {
+pub fn register_encoder(info: oxideav_core::CodecInfo) -> oxideav_core::CodecInfo {
     info.encoder(make_encoder)
 }
 

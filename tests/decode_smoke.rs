@@ -1,10 +1,10 @@
 //! Smoke-test the iLBC decoder end-to-end via the public registry API.
 
-use oxideav_codec::CodecRegistry;
+use oxideav_core::CodecRegistry;
 use oxideav_core::{CodecId, CodecParameters, Frame, Packet, SampleFormat, TimeBase};
 
 /// Build a decoder through the registry like a downstream user would.
-fn make_dec() -> Box<dyn oxideav_codec::Decoder> {
+fn make_dec() -> Box<dyn oxideav_core::Decoder> {
     let mut reg = CodecRegistry::new();
     oxideav_ilbc::register(&mut reg);
     let mut params = CodecParameters::audio(CodecId::new(oxideav_ilbc::CODEC_ID_STR));

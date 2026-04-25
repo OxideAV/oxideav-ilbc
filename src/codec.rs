@@ -4,8 +4,8 @@
 //! from packet length (38 -> 20 ms / 160 samples, 50 -> 30 ms / 240
 //! samples). Both modes produce 8 kHz mono `S16` audio.
 
-use oxideav_codec::{CodecInfo, CodecRegistry, Decoder, Encoder};
 use oxideav_core::{CodecCapabilities, CodecId, CodecParameters, Result};
+use oxideav_core::{CodecInfo, CodecRegistry, Decoder, Encoder};
 
 use crate::{CODEC_ID_STR, SAMPLE_RATE};
 

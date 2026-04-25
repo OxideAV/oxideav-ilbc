@@ -17,7 +17,7 @@
 //! - [`synthesis`]: 10th-order LPC synthesis (§4.7), pitch-emphasis
 //!   post-filter (§4.8 simplified), and a dampened pitch-synchronous
 //!   PLC unit (§4.5).
-//! - [`decoder`]: wires those pieces into the `oxideav_codec::Decoder`
+//! - [`decoder`]: wires those pieces into the `oxideav_core::Decoder`
 //!   trait.
 //!
 //! The frame mode is inferred from packet length:
@@ -52,7 +52,7 @@ pub mod state;
 pub mod state_encode;
 pub mod synthesis;
 
-use oxideav_codec::CodecRegistry;
+use oxideav_core::CodecRegistry;
 
 /// Codec id string.
 pub const CODEC_ID_STR: &str = "ilbc";
