@@ -91,10 +91,10 @@ pub fn synthesise(
 /// mandates only an optional 65 Hz HP post-filter.
 pub fn pitch_emphasis_post(samples: &mut [f32; SUBL], mem: &mut f32) {
     let alpha = 0.25_f32;
-    for n in 0..SUBL {
-        let y = samples[n] + alpha * *mem;
+    for s in samples.iter_mut() {
+        let y = *s + alpha * *mem;
         *mem = y;
-        samples[n] = y;
+        *s = y;
     }
 }
 
@@ -138,7 +138,7 @@ pub fn conceal_frame(state: &mut SynthState, mode: FrameMode, out: &mut [f32]) {
     let n_sub = mode.sub_blocks();
     for sb in 0..n_sub {
         let mut exc = [0.0f32; SUBL];
-        for n in 0..SUBL {
+        for e in exc.iter_mut() {
             // xorshift32 pseudorandom
             let mut s = state.plc_seed;
             s ^= s << 13;
@@ -147,7 +147,7 @@ pub fn conceal_frame(state: &mut SynthState, mode: FrameMode, out: &mut [f32]) {
             state.plc_seed = s;
             // Map to [-1, +1].
             let r = ((s as i32) as f32) / (i32::MAX as f32);
-            exc[n] = r * sigma;
+            *e = r * sigma;
         }
         let mut y = [0.0f32; SUBL];
         synthesise(&exc, &state.last_a, &mut state.mem, &mut y);

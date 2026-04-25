@@ -147,8 +147,8 @@ pub fn lsf_to_lpc(lsf: &[f32; LPC_ORDER]) -> [f32; LPC_ORDER + 1] {
     // Normalise so a[0] == 1 exactly (numeric robustness).
     let a0 = a[0];
     if a0.abs() > 1e-12 {
-        for k in 0..=LPC_ORDER {
-            a[k] /= a0;
+        for a_k in a.iter_mut() {
+            *a_k /= a0;
         }
     } else {
         a[0] = 1.0;

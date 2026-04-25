@@ -102,12 +102,12 @@ fn best_snr_db(reference: &[i16], test: &[i16], max_lag: isize) -> f64 {
     for lag in -max_lag..=max_lag {
         let mut s_sig = 0.0f64;
         let mut s_err = 0.0f64;
-        for i in 0..len {
+        for (i, &r_sample) in reference.iter().take(len).enumerate() {
             let j = i as isize + lag;
             if j < 0 || j as usize >= test.len() {
                 continue;
             }
-            let r = reference[i] as f64;
+            let r = r_sample as f64;
             let t = test[j as usize] as f64;
             s_sig += r * r;
             s_err += (r - t) * (r - t);

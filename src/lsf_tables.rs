@@ -13,6 +13,11 @@
 //!
 //! Dequantisation is a direct lookup: `lsfdeq[j] = lsfCbTbl[index][j]`.
 
+// Every literal in this module is a normative spec constant from
+// RFC 3951 Appendix A.8 — preserve the verbatim text-of-RFC bytes,
+// even where they exceed f32 precision.
+#![allow(clippy::excessive_precision)]
+
 use crate::LPC_ORDER;
 
 /// Mean LSF vector (§3.2.6, `lsfmeanTbl`).
@@ -411,9 +416,7 @@ pub fn assemble_lsf(indices: &[u16; 3]) -> [f32; LPC_ORDER] {
         let dim = SPLIT_DIMS[s];
         let off = SPLIT_OFFSETS[s];
         let sub = lookup_split(s, indices[s]);
-        for j in 0..dim {
-            lsf[off + j] = sub[j];
-        }
+        lsf[off..off + dim].copy_from_slice(&sub[..dim]);
     }
     lsf
 }
@@ -452,9 +455,9 @@ mod tests {
         for split in 0..3 {
             for i in 0..SPLIT_SIZES[split] as u16 {
                 let v = lookup_split(split, i);
-                for j in 0..SPLIT_DIMS[split] {
-                    assert!(v[j].is_finite());
-                    assert!(v[j] > 0.0);
+                for &x in v.iter().take(SPLIT_DIMS[split]) {
+                    assert!(x.is_finite());
+                    assert!(x > 0.0);
                 }
             }
         }

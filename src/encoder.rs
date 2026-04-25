@@ -214,16 +214,11 @@ impl IlbcEncoder {
         // truly equals the target output, which isn't the case with
         // 3-bit scalar state quantisation and a 3-stage CB.
         let mut residual = vec![0.0f32; samples];
-        for sb in 0..mode.sub_blocks() {
+        for (sb, a) in a_per_sub.iter().enumerate().take(mode.sub_blocks()) {
             let lo = sb * SUBL;
             let hi = lo + SUBL;
             let mut out = vec![0.0f32; SUBL];
-            lpc_analysis_filter(
-                &frame_pcm[lo..hi],
-                &a_per_sub[sb],
-                &mut self.lpc_mem,
-                &mut out,
-            );
+            lpc_analysis_filter(&frame_pcm[lo..hi], a, &mut self.lpc_mem, &mut out);
             residual[lo..hi].copy_from_slice(&out);
         }
 
@@ -257,13 +252,9 @@ impl IlbcEncoder {
         // Reset the CB memory the way the decoder does at the start of
         // every frame: zero-pad before STATE_LEN-CB_LMEM, then the state
         // vector goes at the tail.
-        for i in 0..CB_LMEM {
-            self.cb_mem[i] = if i >= CB_LMEM - STATE_LEN {
-                state_vec[i - (CB_LMEM - STATE_LEN)]
-            } else {
-                0.0
-            };
-        }
+        let pad = CB_LMEM - STATE_LEN;
+        self.cb_mem[..pad].fill(0.0);
+        self.cb_mem[pad..].copy_from_slice(&state_vec);
 
         // ---- 5. Boundary CB search (22/23 samples) ----
         let boundary_samples = match mode {
@@ -287,9 +278,8 @@ impl IlbcEncoder {
         // boundary_samples + i]` and also pushes `boundary_exc` as a
         // full SUBL-sample block into the CB memory (padded with zeros).
         let mut boundary_block = [0.0f32; SUBL];
-        for i in 0..boundary_samples.min(SUBL) {
-            boundary_block[i] = boundary_rec[i];
-        }
+        let copy_n = boundary_samples.min(SUBL);
+        boundary_block[..copy_n].copy_from_slice(&boundary_rec[..copy_n]);
         update_cb_memory(&mut self.cb_mem, &boundary_block);
 
         // ---- 6. Remaining 40-sample sub-blocks: analysis-by-synthesis ----
@@ -310,23 +300,24 @@ impl IlbcEncoder {
             // This approximates the decoder's synth memory at sub-block 2's
             // start. Using a_per_sub[0] for sub-blocks 0-1 (two halves).
             let mut tmp_mem = [0.0f32; LPC_ORDER];
-            for sb in 0..2.min(mode.sub_blocks()) {
-                let a = &a_per_sub[sb];
+            for (sb, a) in a_per_sub.iter().enumerate().take(2.min(mode.sub_blocks())) {
                 let sb_start = sb * SUBL;
                 let mut exc = [0.0f32; SUBL];
                 // Build the excitation the decoder uses for this state
                 // sub-block.
-                for i in 0..SUBL {
+                for (i, e) in exc.iter_mut().enumerate() {
                     if sb_start + i < STATE_LEN {
-                        exc[i] = state_vec[sb_start + i];
+                        *e = state_vec[sb_start + i];
                     }
                     if sb_start + i >= STATE_LEN - boundary_samples && sb_start + i < STATE_LEN {
                         let b_off = sb_start + i - (STATE_LEN - boundary_samples);
                         if b_off < boundary_samples.min(SUBL) {
-                            exc[i] += boundary_rec[b_off];
+                            *e += boundary_rec[b_off];
                         }
                     }
                 }
+                // RFC 3951 §4.7 eq.: y(n) = x(n) - Σ a[k]·y(n-k), 1≤k≤LPC_ORDER.
+                #[allow(clippy::needless_range_loop)] // RFC 3951 §4.7 LPC synthesis
                 for n in 0..SUBL {
                     let mut s = exc[n];
                     for k in 1..=LPC_ORDER {
@@ -350,16 +341,16 @@ impl IlbcEncoder {
             }
             let a = &a_per_sub[sb];
             // Compute zero-input response (ZIR) of 1/A(z) for this
-            // sub-block given `synth_mem`.
+            // sub-block given `synth_mem`. RFC 3951 §4.7.
             let zir = {
                 let mut mem = synth_mem;
                 let mut out = [0.0f32; SUBL];
-                for n in 0..SUBL {
+                for out_n in out.iter_mut() {
                     let mut s = 0.0f32;
                     for k in 1..=LPC_ORDER {
                         s -= a[k] * mem[k - 1];
                     }
-                    out[n] = s;
+                    *out_n = s;
                     for k in (1..LPC_ORDER).rev() {
                         mem[k] = mem[k - 1];
                     }
@@ -368,16 +359,13 @@ impl IlbcEncoder {
                 out
             };
             // PCM target = input - ZIR.
-            let mut pcm_target = [0.0f32; SUBL];
-            for i in 0..SUBL {
-                pcm_target[i] = frame_pcm[lo + i] - zir[i];
-            }
+            let pcm_target: [f32; SUBL] = core::array::from_fn(|i| frame_pcm[lo + i] - zir[i]);
             let (res, excitation) = search_cb_abs(&self.cb_mem, a, &pcm_target);
             // Advance synth_mem using the PCM output = ZIR + ZSR(excitation).
-            // We compute the actual output sample-by-sample.
+            // We compute the actual output sample-by-sample. RFC 3951 §4.7.
             let mut mem = synth_mem;
-            for n in 0..SUBL {
-                let mut s = excitation[n];
+            for &exc_n in excitation.iter() {
+                let mut s = exc_n;
                 for k in 1..=LPC_ORDER {
                     s -= a[k] * mem[k - 1];
                 }

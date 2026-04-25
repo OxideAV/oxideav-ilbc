@@ -23,12 +23,14 @@ use crate::FrameMode;
 
 /// 3-bit start-state shape dequantisation table, verbatim from
 /// RFC 3951 Appendix A.8 `state_sq3Tbl`.
+#[allow(clippy::excessive_precision)] // RFC 3951 Appendix A.8 verbatim
 pub const STATE_SQ3_TBL: [f32; 8] = [
     -3.719849, -2.177490, -1.130005, -0.309692, 0.444214, 1.329712, 2.436279, 3.983887,
 ];
 
 /// 6-bit first-residual-gain quantisation table, verbatim from
 /// RFC 3951 Appendix A.8 `state_frgqTbl`.
+#[allow(clippy::excessive_precision)] // RFC 3951 Appendix A.8 verbatim
 pub const STATE_FRGQ_TBL: [f32; 64] = [
     1.000085, 1.071695, 1.140395, 1.206868, 1.277188, 1.351503, 1.429380, 1.500727, 1.569049,
     1.639599, 1.707071, 1.781531, 1.840799, 1.901550, 1.956695, 2.006750, 2.055474, 2.102787,
@@ -103,7 +105,8 @@ pub fn allpass_zero_pole(input: &[f32], a: &[f32]) -> Vec<f32> {
     let mut out = vec![0.0f32; len];
 
     // AllZeroFilter: out[n] = Σ_{k=0..=order} numerator[k] * input[n-k],
-    // with zero history before n=0.
+    // with zero history before n=0.  RFC 3951 §3.5.2 zero/pole all-pass.
+    #[allow(clippy::needless_range_loop)] // RFC 3951 §3.5.2 (AllZeroFilter)
     for n in 0..len {
         let mut s = numerator[0] * input[n];
         for k in 1..=order {
@@ -116,6 +119,7 @@ pub fn allpass_zero_pole(input: &[f32], a: &[f32]) -> Vec<f32> {
     }
 
     // AllPoleFilter in place: out[n] -= Σ_{k=1..=order} a[k] * out[n-k].
+    #[allow(clippy::needless_range_loop)] // RFC 3951 §3.5.2 (AllPoleFilter)
     for n in 0..len {
         for k in 1..=order {
             let idx = n as isize - k as isize;
@@ -153,10 +157,10 @@ pub fn allpass_filter(shape: &[f32], a: &[f32]) -> Vec<f32> {
     padded[..n].copy_from_slice(shape);
     let fout = allpass_zero_pole(&padded, a);
 
-    // Fold: out(k) = fout(N-1-k) + fout(2N-1-k).
+    // Fold: out(k) = fout(N-1-k) + fout(2N-1-k).  RFC 3951 §3.5.2.
     let mut out = vec![0.0f32; n];
-    for k in 0..n {
-        out[k] = fout[n - 1 - k] + fout[2 * n - 1 - k];
+    for (k, o) in out.iter_mut().enumerate() {
+        *o = fout[n - 1 - k] + fout[2 * n - 1 - k];
     }
     out
 }
@@ -182,10 +186,10 @@ pub fn reconstruct_scalar_state(
 
     // Build `in(0..N-1)` = time-reversed (scaled) shape.
     let mut reversed_scaled = vec![0.0f32; n];
-    for k in 0..n {
+    for (k, r) in reversed_scaled.iter_mut().enumerate() {
         let tmpi = n - 1 - k;
         let idx = (state_samples[tmpi] & 0x7) as usize;
-        reversed_scaled[k] = inv_scal * STATE_SQ3_TBL[idx];
+        *r = inv_scal * STATE_SQ3_TBL[idx];
     }
 
     // Apply the all-pass / fold. `allpass_filter` handles the zero

@@ -24,18 +24,6 @@
 //! - 38 bytes  -> 20 ms / 160 samples / 304 bits
 //! - 50 bytes  -> 30 ms / 240 samples / 400 bits
 
-#![allow(
-    clippy::needless_range_loop,
-    clippy::unnecessary_cast,
-    clippy::excessive_precision,
-    clippy::approx_constant,
-    clippy::doc_lazy_continuation,
-    clippy::doc_overindented_list_items,
-    clippy::too_many_arguments,
-    clippy::manual_range_contains,
-    clippy::manual_memcpy
-)]
-
 pub mod bitreader;
 pub mod bitwriter;
 pub mod cb;

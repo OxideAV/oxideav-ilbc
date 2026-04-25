@@ -8,8 +8,9 @@
 //!      — reusing the decoder's [`crate::cb::extract_cbvec_veclen`].
 //!   2. At stage 0, picks the codebook vector with the largest
 //!      `(target·cbvec)^2 / ||cbvec||^2` subject to:
-//!        * `target·cbvec > 0`
-//!        * `|gain| < CB_MAXGAIN = 1.3`
+//!      * `target·cbvec > 0`
+//!      * `|gain| < CB_MAXGAIN = 1.3`
+//!
 //!      and quantises the positive gain against `GAIN_SQ5_TBL` (5 bits).
 //!   3. At stages 1 and 2, subtracts the gain-scaled stage-k vector from
 //!      the target, searches for the best remaining match, and quantises
@@ -257,13 +258,12 @@ pub fn search_cb_abs(
         let mut best_idx = 0u16;
         let mut best_measure = f32::NEG_INFINITY;
         let mut best_gain = 0.0f32;
-        for i in 0..total {
-            let zsr = &zsrs[i];
+        for (i, zsr) in zsrs.iter().take(total).enumerate() {
             let mut dot = 0.0f32;
             let mut nrm = 0.0f32;
-            for n in 0..SUBL {
-                dot += t[n] * zsr[n];
-                nrm += zsr[n] * zsr[n];
+            for (&t_n, &z_n) in t.iter().zip(zsr.iter()) {
+                dot += t_n * z_n;
+                nrm += z_n * z_n;
             }
             if nrm < 1e-12 {
                 continue;
@@ -304,9 +304,13 @@ pub fn search_cb_abs(
         // contribution `g_deq * cbvec` to the reconstructed excitation.
         let zsr = &zsrs[best_idx as usize];
         let cbv = extract_cbvec_veclen(cb_mem, best_idx, SUBL);
-        for n in 0..SUBL {
-            t[n] -= g_deq * zsr[n];
-            excitation[n] += g_deq * cbv[n];
+        for ((t_n, e_n), (&z_n, &c_n)) in t
+            .iter_mut()
+            .zip(excitation.iter_mut())
+            .zip(zsr.iter().zip(cbv.iter()))
+        {
+            *t_n -= g_deq * z_n;
+            *e_n += g_deq * c_n;
         }
     }
     (CbSearchResult { cb_idx, gain_idx }, excitation)
@@ -376,17 +380,11 @@ mod tests {
         // Then construct the ideal `excitation = gain0*v0` and search:
         // the first stage must pick idx 0 with a positive gain close to
         // `gain0`.
-        let mut mem = [0.0f32; CB_LMEM];
         // Fill with a simple ramp so extracted vectors differ.
-        for i in 0..CB_LMEM {
-            mem[i] = ((i as f32) * 0.1).sin() * 100.0;
-        }
+        let mem: [f32; CB_LMEM] = core::array::from_fn(|i| ((i as f32) * 0.1).sin() * 100.0);
         let v0 = extract_cbvec(&mem, 0);
-        let mut target = [0.0f32; SUBL];
         let gain = 0.5_f32;
-        for n in 0..SUBL {
-            target[n] = gain * v0[n];
-        }
+        let target: [f32; SUBL] = core::array::from_fn(|n| gain * v0[n]);
         let (res, _rec) = search_cb_subl(&mem, &target);
         // Stage 0 should pick a vector strongly correlated with target.
         // With this specific target the best idx should be 0 (exact
@@ -400,10 +398,7 @@ mod tests {
 
     #[test]
     fn search_cb_round_trip_stable() {
-        let mut mem = [0.0f32; CB_LMEM];
-        for i in 0..CB_LMEM {
-            mem[i] = ((i as f32) * 0.3).cos() * 50.0;
-        }
+        let mem: [f32; CB_LMEM] = core::array::from_fn(|i| ((i as f32) * 0.3).cos() * 50.0);
         let target = [12.3f32; SUBL];
         let (res, rec) = search_cb_subl(&mem, &target);
         // Reconstruction should match the decoder's own construction.
@@ -420,10 +415,7 @@ mod tests {
 
     #[test]
     fn search_cb_zero_target_finds_any_valid() {
-        let mut mem = [0.0f32; CB_LMEM];
-        for i in 0..CB_LMEM {
-            mem[i] = (i as f32).cos();
-        }
+        let mem: [f32; CB_LMEM] = core::array::from_fn(|i| (i as f32).cos());
         let target = [0.0f32; SUBL];
         let (res, _) = search_cb_subl(&mem, &target);
         // Any index is fine; just verify bounds.

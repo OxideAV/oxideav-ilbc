@@ -151,10 +151,14 @@ impl IlbcDecoder {
             FrameMode::Ms20 => 23,
             FrameMode::Ms30 => 22,
         };
-        for i in 0..boundary_samples.min(SUBL) {
+        for (i, &sample) in boundary_exc
+            .iter()
+            .take(boundary_samples.min(SUBL))
+            .enumerate()
+        {
             let dst = STATE_LEN - boundary_samples + i;
             if dst < excitation.len() {
-                excitation[dst] += boundary_exc[i];
+                excitation[dst] += sample;
             }
         }
         update_cb_memory(&mut self.cb_mem, &boundary_exc);

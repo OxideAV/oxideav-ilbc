@@ -45,6 +45,7 @@ const CB_HALFFILTERLEN: usize = CB_FILTERLEN / 2;
 /// the previous stage's dequantised gain (clamped to a floor of 0.1).
 ///
 /// All three tables are transcribed verbatim from RFC 3951 Appendix A.8.
+#[allow(clippy::excessive_precision)] // RFC 3951 Appendix A.8 verbatim
 pub const GAIN_SQ5_TBL: [f32; 32] = [
     0.037476, 0.075012, 0.112488, 0.150024, 0.187500, 0.224976, 0.262512, 0.299988, 0.337524,
     0.375000, 0.412476, 0.450012, 0.487488, 0.525024, 0.562500, 0.599976, 0.637512, 0.674988,
@@ -109,26 +110,24 @@ pub(crate) fn create_augmented_vec(
 
     // Copy first non-interpolated part (length `index`).
     let pp_start = lmem - index;
-    for j in 0..index {
-        cbvec[j] = mem[pp_start + j];
-    }
+    cbvec[..index].copy_from_slice(&mem[pp_start..pp_start + index]);
 
-    // Interpolation: 5 samples, indices ilow..index.
+    // Interpolation: 5 samples, indices ilow..index — RFC 3951 §3.6.3
+    // augmented codebook construction (`createAugmentedVec`).
     let alfa1 = 0.2_f32;
     let mut alfa = 0.0_f32;
     let ppo_start = lmem - 5;
     let ppi_start = lmem - index - 5;
-    for j in ilow..index {
-        let ppo = mem[ppo_start + (j - ilow)];
-        let ppi = mem[ppi_start + (j - ilow)];
+    for (offset, j) in (ilow..index).enumerate() {
+        let ppo = mem[ppo_start + offset];
+        let ppi = mem[ppi_start + offset];
         cbvec[j] = (1.0 - alfa) * ppo + alfa * ppi;
         alfa += alfa1;
     }
 
     // Copy second non-interpolated part (length SUBL - index).
-    for j in 0..(SUBL - index) {
-        cbvec[index + j] = mem[pp_start + j];
-    }
+    let tail = SUBL - index;
+    cbvec[index..index + tail].copy_from_slice(&mem[pp_start..pp_start + tail]);
 }
 
 /// Apply the 8-tap `cbfiltersTbl` FIR filter to the codebook memory
@@ -150,20 +149,18 @@ fn filter_cb_memory(mem: &[f32]) -> Vec<f32> {
 
     // Build padded buffer: CB_HALFFILTERLEN zeros, then mem, then tail.
     let mut padded = vec![0.0f32; total + 1];
-    for i in 0..lmem {
-        padded[pad + i] = mem[i];
-    }
+    padded[pad..pad + lmem].copy_from_slice(mem);
 
     // Convolve: out[n] = Σ_{j=0..CB_FILTERLEN} padded[n + j] * tbl[CB_FILTERLEN-1-j]
     // which with tbl[CB_FILTERLEN-1-j] traversal is exactly the reference
     // loop (pp1 decrementing from &cbfiltersTbl[CB_FILTERLEN-1]).
     let mut out = vec![0.0f32; lmem];
-    for n in 0..lmem {
+    for (n, out_n) in out.iter_mut().enumerate() {
         let mut s = 0.0f32;
         for j in 0..CB_FILTERLEN {
             s += padded[n + j] * CB_FILTERS_TBL[CB_FILTERLEN - 1 - j];
         }
-        out[n] = s;
+        *out_n = s;
     }
     out
 }
@@ -254,8 +251,8 @@ pub fn construct_excitation(
     let mut exc = [0.0f32; SUBL];
     for stage in 0..3 {
         let v = extract_cbvec(cb_mem, cb_idx[stage]);
-        for n in 0..SUBL {
-            exc[n] += gains[stage] * v[n];
+        for (e, &v_n) in exc.iter_mut().zip(v.iter()) {
+            *e += gains[stage] * v_n;
         }
     }
     exc
@@ -264,12 +261,8 @@ pub fn construct_excitation(
 /// Update the adaptive codebook memory: shift left by `SUBL` and
 /// append `new_excitation` at the tail.
 pub fn update_cb_memory(cb_mem: &mut [f32; CB_LMEM], new_excitation: &[f32; SUBL]) {
-    for i in 0..(CB_LMEM - SUBL) {
-        cb_mem[i] = cb_mem[i + SUBL];
-    }
-    for i in 0..SUBL {
-        cb_mem[CB_LMEM - SUBL + i] = new_excitation[i];
-    }
+    cb_mem.copy_within(SUBL.., 0);
+    cb_mem[CB_LMEM - SUBL..].copy_from_slice(new_excitation);
 }
 
 #[cfg(test)]
@@ -328,10 +321,7 @@ mod tests {
         // Index 10 is in the base region. Reference formula:
         //   k = index + cbveclen = 50, start = lMem - k = 97.
         //   cbvec[j] = mem[97 + j], i.e. 97..137.
-        let mut mem = [0.0f32; CB_LMEM];
-        for i in 0..CB_LMEM {
-            mem[i] = i as f32;
-        }
+        let mem: [f32; CB_LMEM] = core::array::from_fn(|i| i as f32);
         let v = extract_cbvec(&mem, 10);
         assert_eq!(v[0], 97.0);
         assert_eq!(v[SUBL - 1], 97.0 + (SUBL as f32) - 1.0);
@@ -341,10 +331,7 @@ mod tests {
     fn extract_cbvec_augmented_base() {
         // Augmented base region begins at index 108 (base_size_no_aug).
         // Index 108 -> aug_idx = (2*0 + 40)/2 = 20.
-        let mut mem = [0.0f32; CB_LMEM];
-        for i in 0..CB_LMEM {
-            mem[i] = i as f32;
-        }
+        let mem: [f32; CB_LMEM] = core::array::from_fn(|i| i as f32);
         let v_aug = extract_cbvec(&mem, 108);
         // Region layout for aug_idx=20:
         //   j in [0..15): mem[127..142] (first non-interpolated part)
@@ -352,12 +339,12 @@ mod tests {
         //                  mem[122..127] (pi) with pi weights
         //                  [0.0, 0.2, 0.4, 0.6, 0.8].
         //   j in [20..40): mem[127..147] (second non-interpolated part)
-        for j in 0..15 {
-            assert_eq!(v_aug[j], 127.0 + j as f32);
+        for (j, &got) in v_aug.iter().take(15).enumerate() {
+            assert_eq!(got, 127.0 + j as f32);
         }
         let pi_w = [0.0_f32, 0.2, 0.4, 0.6, 0.8];
-        for k in 0..5 {
-            let expected = (1.0 - pi_w[k]) * (142.0 + k as f32) + pi_w[k] * (122.0 + k as f32);
+        for (k, &w) in pi_w.iter().enumerate() {
+            let expected = (1.0 - w) * (142.0 + k as f32) + w * (122.0 + k as f32);
             let got = v_aug[15 + k];
             assert!(
                 (got - expected).abs() < 1e-4,
@@ -367,8 +354,8 @@ mod tests {
                 expected
             );
         }
-        for j in 0..20 {
-            assert_eq!(v_aug[20 + j], 127.0 + j as f32);
+        for (j, &got) in v_aug[20..40].iter().enumerate() {
+            assert_eq!(got, 127.0 + j as f32);
         }
     }
 
@@ -379,8 +366,8 @@ mod tests {
         let v = extract_cbvec(&mem, 127);
         // For aug_idx=39: first non-interpolated part has 39 samples
         // (j=0..34 is the plain copy; j=34..39 is interpolated).
-        for j in 0..34 {
-            assert_eq!(v[j], (CB_LMEM - 39) as f32 + j as f32);
+        for (j, &got) in v.iter().take(34).enumerate() {
+            assert_eq!(got, (CB_LMEM - 39) as f32 + j as f32);
         }
         // Last sample (SUBL - 39 = 1) comes from mem[lMem - 39] = mem[108].
         assert_eq!(v[39], (CB_LMEM - 39) as f32);
@@ -407,26 +394,21 @@ mod tests {
         let lmem = CB_LMEM;
         let mut mem = [0.0f32; CB_LMEM];
         // Set the last 5 "po" samples to 1.0; leave "pi" samples 0.
-        for i in (lmem - 5)..lmem {
-            mem[i] = 1.0;
-        }
+        mem[lmem - 5..lmem].fill(1.0);
         let index = 25;
         let mut out = [0.0f32; SUBL];
         create_augmented_vec(&mem, lmem, index, &mut out);
         // Positions ilow..index are the interpolated slots.
         let expected = [0.0_f32, 0.2, 0.4, 0.6, 0.8];
-        for k in 0..5 {
+        for (k, &w) in expected.iter().enumerate() {
             let v = out[index - 5 + k];
-            assert!((v - (1.0 - expected[k])).abs() < 1e-5);
+            assert!((v - (1.0 - w)).abs() < 1e-5);
         }
     }
 
     #[test]
     fn update_mem_shifts_correctly() {
-        let mut mem = [0.0f32; CB_LMEM];
-        for i in 0..CB_LMEM {
-            mem[i] = i as f32;
-        }
+        let mut mem: [f32; CB_LMEM] = core::array::from_fn(|i| i as f32);
         let new_exc: [f32; SUBL] = core::array::from_fn(|i| -(i as f32));
         update_cb_memory(&mut mem, &new_exc);
         assert_eq!(mem[0], SUBL as f32); // old index SUBL moved to 0

@@ -123,9 +123,9 @@ impl Default for EnhancerState {
 fn xcorr_coef(target: &[f32], regressor: &[f32]) -> f32 {
     let mut tr = 0.0f32;
     let mut rr = 0.0f32;
-    for i in 0..target.len() {
-        tr += target[i] * regressor[i];
-        rr += regressor[i] * regressor[i];
+    for (&t, &r) in target.iter().zip(regressor.iter()) {
+        tr += t * r;
+        rr += r * r;
     }
     if tr > 0.0 && rr > 0.0 {
         tr * tr / rr
@@ -138,8 +138,8 @@ fn xcorr_coef(target: &[f32], regressor: &[f32]) -> f32 {
 fn nearest_neighbor(array: &[f32], value: f32) -> usize {
     let mut best = 0usize;
     let mut best_d = (array[0] - value).powi(2);
-    for i in 1..array.len() {
-        let d = (array[i] - value).powi(2);
+    for (i, &v) in array.iter().enumerate().skip(1) {
+        let d = (v - value).powi(2);
         if d < best_d {
             best_d = d;
             best = i;
@@ -154,12 +154,12 @@ fn mycorr1(seq1: &[f32], seq2: &[f32], corr: &mut [f32]) {
     let dim1 = seq1.len();
     let dim2 = seq2.len();
     debug_assert!(corr.len() >= dim1 + 1 - dim2);
-    for i in 0..=(dim1 - dim2) {
+    for (i, c) in corr.iter_mut().take(dim1 - dim2 + 1).enumerate() {
         let mut s = 0.0f32;
         for j in 0..dim2 {
             s += seq1[i + j] * seq2[j];
         }
-        corr[i] = s;
+        *c = s;
     }
 }
 
@@ -176,20 +176,24 @@ fn enh_upsample(seq1: &[f32], useq1: &mut [f32]) {
     let mut offsets = [0usize; ENH_UPS0];
     if filterlength > dim1 {
         let hfl2 = dim1 / 2;
-        for j in 0..ENH_UPS0 {
-            offsets[j] = j * filterlength + hfl - hfl2;
+        for (j, off) in offsets.iter_mut().enumerate() {
+            *off = j * filterlength + hfl - hfl2;
         }
         hfl = hfl2;
         filterlength = 2 * hfl + 1;
     } else {
-        for j in 0..ENH_UPS0 {
-            offsets[j] = j * filterlength;
+        for (j, off) in offsets.iter_mut().enumerate() {
+            *off = j * filterlength;
         }
     }
 
     let mut pu = 0usize;
 
     // Left overhang: filter overhangs left side of sequence.
+    // RFC 3951 Appendix A.16 polyphase upsampler — `ps` walks back from
+    // seq1[i], `pp` walks forward through POLYPHASER_TBL[offset..]; both
+    // indices key off `i` and `j` so per-call-site allow.
+    #[allow(clippy::needless_range_loop)] // RFC 3951 Appendix A.16 (enh_upsample)
     for i in hfl..filterlength {
         for j in 0..ENH_UPS0 {
             let mut s = 0.0f32;
@@ -205,6 +209,7 @@ fn enh_upsample(seq1: &[f32], useq1: &mut [f32]) {
     }
 
     // Middle section: simple convolution.
+    #[allow(clippy::needless_range_loop)] // RFC 3951 Appendix A.16 (enh_upsample)
     for i in filterlength..dim1 {
         for j in 0..ENH_UPS0 {
             let mut s = 0.0f32;
@@ -219,6 +224,7 @@ fn enh_upsample(seq1: &[f32], useq1: &mut [f32]) {
     }
 
     // Right overhang.
+    #[allow(clippy::needless_range_loop)] // RFC 3951 Appendix A.16 (enh_upsample)
     for q in 1..=hfl {
         for j in 0..ENH_UPS0 {
             let mut s = 0.0f32;
@@ -270,10 +276,10 @@ fn refiner(
     enh_upsample(&corr_vec, &mut corr_ups);
     let mut tloc = 0usize;
     let mut maxv = corr_ups[0];
-    for i in 1..corrdim * ENH_UPS0 {
-        if corr_ups[i] > maxv {
+    for (i, &v) in corr_ups.iter().enumerate().take(corrdim * ENH_UPS0).skip(1) {
+        if v > maxv {
             tloc = i;
-            maxv = corr_ups[i];
+            maxv = v;
         }
     }
 
@@ -289,22 +295,17 @@ fn refiner(
     let mut vect = [0.0f32; ENH_VECTL];
     if st < 0 {
         let neg = (-st) as usize;
-        for i in 0..(ENH_VECTL - neg).min(idatal) {
-            vect[neg + i] = idata[i];
-        }
+        let take = (ENH_VECTL - neg).min(idatal);
+        vect[neg..neg + take].copy_from_slice(&idata[..take]);
     } else {
         let st_u = st as usize;
         let en = st_u + ENH_VECTL;
         if en > idatal {
             let take = ENH_VECTL - (en - idatal);
-            for i in 0..take {
-                vect[i] = idata[st_u + i];
-            }
+            vect[..take].copy_from_slice(&idata[st_u..st_u + take]);
             // remainder stays zero
         } else {
-            for i in 0..ENH_VECTL {
-                vect[i] = idata[st_u + i];
-            }
+            vect.copy_from_slice(&idata[st_u..st_u + ENH_VECTL]);
         }
     }
 
@@ -315,12 +316,12 @@ fn refiner(
 
     // mycorr1(seg, vect, polyphaser_kernel) — output length ENH_BLOCKL.
     let dim2 = 2 * ENH_FL0 + 1;
-    for i in 0..ENH_BLOCKL {
+    for (i, seg_i) in seg.iter_mut().enumerate() {
         let mut s = 0.0f32;
         for j in 0..dim2 {
             s += vect[i + j] * kernel[j];
         }
-        seg[i] = s;
+        *seg_i = s;
     }
 }
 
@@ -340,19 +341,19 @@ fn smath(odata: &mut [f32], sseq: &[f32], hl: usize, alpha0: f32) {
 
     // Surround sum: Σ_{k != hl} sseq[k·ENH_BLOCKL .. ] * wt[k].
     let mut surround = [0.0f32; ENH_BLOCKL];
-    for i in 0..ENH_BLOCKL {
-        surround[i] = sseq[i] * wt[0];
+    for (i, s) in surround.iter_mut().enumerate() {
+        *s = sseq[i] * wt[0];
     }
-    for k in 1..hl {
+    for (k, &w) in wt.iter().enumerate().take(hl).skip(1) {
         let base = k * ENH_BLOCKL;
-        for i in 0..ENH_BLOCKL {
-            surround[i] += sseq[base + i] * wt[k];
+        for (i, s) in surround.iter_mut().enumerate() {
+            *s += sseq[base + i] * w;
         }
     }
-    for k in (hl + 1)..=(2 * hl) {
+    for (k, &w) in wt.iter().enumerate().take(2 * hl + 1).skip(hl + 1) {
         let base = k * ENH_BLOCKL;
-        for i in 0..ENH_BLOCKL {
-            surround[i] += sseq[base + i] * wt[k];
+        for (i, s) in surround.iter_mut().enumerate() {
+            *s += sseq[base + i] * w;
         }
     }
 
@@ -361,9 +362,8 @@ fn smath(odata: &mut [f32], sseq: &[f32], hl: usize, alpha0: f32) {
     let mut w00 = 0.0f32;
     let mut w11 = 0.0f32;
     let mut w10 = 0.0f32;
-    for i in 0..ENH_BLOCKL {
+    for (i, &r) in surround.iter().enumerate() {
         let p = sseq[centre_off + i];
-        let r = surround[i];
         w00 += p * p;
         w11 += r * r;
         w10 += r * p;
@@ -375,10 +375,15 @@ fn smath(odata: &mut [f32], sseq: &[f32], hl: usize, alpha0: f32) {
 
     // First try without power constraint.
     let mut errs = 0.0f32;
-    for i in 0..ENH_BLOCKL {
+    for (i, (out, &surr)) in odata
+        .iter_mut()
+        .zip(surround.iter())
+        .enumerate()
+        .take(ENH_BLOCKL)
+    {
         let p = sseq[centre_off + i];
-        odata[i] = c * surround[i];
-        let err = p - odata[i];
+        *out = c * surr;
+        let err = p - *out;
         errs += err * err;
     }
 
@@ -395,8 +400,13 @@ fn smath(odata: &mut [f32], sseq: &[f32], hl: usize, alpha0: f32) {
         } else {
             (0.0, 1.0)
         };
-        for i in 0..ENH_BLOCKL {
-            odata[i] = a * surround[i] + b * sseq[centre_off + i];
+        for (i, (out, &surr)) in odata
+            .iter_mut()
+            .zip(surround.iter())
+            .enumerate()
+            .take(ENH_BLOCKL)
+        {
+            *out = a * surr + b * sseq[centre_off + i];
         }
     }
 }
@@ -422,9 +432,8 @@ fn getsseq(
     let mut block_start_pos = [0.0f32; 7];
     block_start_pos[hl] = center_start_pos as f32;
     let pss_off = hl * ENH_BLOCKL;
-    for i in 0..ENH_BLOCKL {
-        sseq[pss_off + i] = idata[center_start_pos + i];
-    }
+    sseq[pss_off..pss_off + ENH_BLOCKL]
+        .copy_from_slice(&idata[center_start_pos..center_start_pos + ENH_BLOCKL]);
 
     // Past blocks (q = hl-1 .. 0).
     for q in (0..hl).rev() {
@@ -444,22 +453,18 @@ fn getsseq(
             );
             block_start_pos[q] = upd;
             let off = q * ENH_BLOCKL;
-            for i in 0..ENH_BLOCKL {
-                sseq[off + i] = seg[i];
-            }
+            sseq[off..off + ENH_BLOCKL].copy_from_slice(&seg);
         } else {
             let off = q * ENH_BLOCKL;
-            for i in 0..ENH_BLOCKL {
-                sseq[off + i] = 0.0;
-            }
+            sseq[off..off + ENH_BLOCKL].fill(0.0);
         }
     }
 
     // Future blocks (q = hl+1 .. 2*hl).
     // plocs2 = plocs - period (elementwise).
     let mut plocs2 = [0.0f32; 8];
-    for i in 0..plocs.len().min(8) {
-        plocs2[i] = plocs[i] - period[i];
+    for (i, p2) in plocs2.iter_mut().take(plocs.len().min(8)).enumerate() {
+        *p2 = plocs[i] - period[i];
     }
     let plocs2 = &plocs2[..plocs.len()];
     for q in (hl + 1)..=(2 * hl) {
@@ -479,14 +484,10 @@ fn getsseq(
             );
             block_start_pos[q] = upd;
             let off = q * ENH_BLOCKL;
-            for i in 0..ENH_BLOCKL {
-                sseq[off + i] = seg[i];
-            }
+            sseq[off..off + ENH_BLOCKL].copy_from_slice(&seg);
         } else {
             let off = q * ENH_BLOCKL;
-            for i in 0..ENH_BLOCKL {
-                sseq[off + i] = 0.0;
-            }
+            sseq[off..off + ENH_BLOCKL].fill(0.0);
         }
     }
 }
@@ -531,11 +532,11 @@ fn downsample(input: &[f32], state: &[f32; 6]) -> Vec<f32> {
         // cover the past samples outside `input`.
         if i + 1 < FILTERORDER_DS {
             let mut state_ptr: isize = FILTERORDER_DS as isize - 2;
-            for j in (i + 1)..FILTERORDER_DS {
+            for &coef in LP_FILT_COEFS_TBL.iter().take(FILTERORDER_DS).skip(i + 1) {
                 if state_ptr < 0 {
                     break;
                 }
-                s += LP_FILT_COEFS_TBL[j] * state[state_ptr as usize];
+                s += coef * state[state_ptr as usize];
                 state_ptr -= 1;
             }
         }
@@ -584,12 +585,8 @@ pub fn enhance_frame(
     debug_assert_eq!(out_exc.len(), blockl);
 
     // Shift enh_buf left by blockl and append new excitation at tail.
-    for i in 0..(ENH_BUFL - blockl) {
-        state.enh_buf[i] = state.enh_buf[i + blockl];
-    }
-    for i in 0..blockl {
-        state.enh_buf[ENH_BUFL - blockl + i] = in_exc[i];
-    }
+    state.enh_buf.copy_within(blockl.., 0);
+    state.enh_buf[ENH_BUFL - blockl..].copy_from_slice(in_exc);
 
     // For 20 ms mode, move processing one block.
     let ioffset = if matches!(mode, FrameMode::Ms20) {
@@ -600,18 +597,14 @@ pub fn enhance_frame(
 
     // Shift enh_period left by (3 - ioffset).
     let i_shift = 3 - ioffset;
-    for i in 0..(ENH_NBLOCKS_TOT - i_shift) {
-        state.enh_period[i] = state.enh_period[i + i_shift];
-    }
+    state.enh_period.copy_within(i_shift.., 0);
 
     // Downsample the trailing window.
     let ds_start = (ENH_NBLOCKS_EXTRA + ioffset) * ENH_BLOCKL;
     let ds_history_start = ds_start - 126; // 6 state + 120 samples back
     let ds_state: [f32; 6] = {
         let mut arr = [0.0f32; 6];
-        for i in 0..6 {
-            arr[i] = state.enh_buf[ds_history_start + i];
-        }
+        arr.copy_from_slice(&state.enh_buf[ds_history_start..ds_history_start + 6]);
         arr
     };
     let ds_in_start = ds_start - 120;
@@ -673,9 +666,8 @@ pub fn enhance_frame(
                 &period,
                 plocs,
             );
-            for n in 0..ENH_BLOCKL {
-                out_exc[iblock * ENH_BLOCKL + n] = block_out[n];
-            }
+            let off = iblock * ENH_BLOCKL;
+            out_exc[off..off + ENH_BLOCKL].copy_from_slice(&block_out);
         }
     } else {
         // 3 blocks with 80-sample delay.
@@ -690,13 +682,12 @@ pub fn enhance_frame(
                 &period,
                 plocs,
             );
-            for n in 0..ENH_BLOCKL {
-                out_exc[iblock * ENH_BLOCKL + n] = block_out[n];
-            }
+            let off = iblock * ENH_BLOCKL;
+            out_exc[off..off + ENH_BLOCKL].copy_from_slice(&block_out);
         }
     }
 
-    (last_lag * 2) as i32
+    last_lag * 2
 }
 
 #[cfg(test)]
@@ -749,13 +740,12 @@ mod tests {
     fn enhance_finite_on_random_input() {
         let mut state = EnhancerState::new();
         // Fill buffer with a sinusoid first to provide pitch context.
-        for i in 0..ENH_BUFL {
-            state.enh_buf[i] = 100.0 * (2.0 * core::f32::consts::PI * (i as f32) / 40.0).sin();
+        for (i, s) in state.enh_buf.iter_mut().enumerate() {
+            *s = 100.0 * (2.0 * core::f32::consts::PI * (i as f32) / 40.0).sin();
         }
-        let mut exc = vec![0.0f32; 160];
-        for i in 0..160 {
-            exc[i] = 50.0 * (2.0 * core::f32::consts::PI * (i as f32) / 40.0).sin();
-        }
+        let exc: Vec<f32> = (0..160)
+            .map(|i| 50.0 * (2.0 * core::f32::consts::PI * (i as f32) / 40.0).sin())
+            .collect();
         let mut out = vec![0.0f32; 160];
         enhance_frame(&mut state, FrameMode::Ms20, &exc, &mut out);
         for &v in &out {
@@ -773,18 +763,17 @@ mod tests {
         let mut state = EnhancerState::new();
         // Prefill several frames of pitched signal.
         let period = 40.0_f32;
-        for i in 0..ENH_BUFL {
-            state.enh_buf[i] = 200.0 * (2.0 * core::f32::consts::PI * (i as f32) / period).sin();
+        for (i, s) in state.enh_buf.iter_mut().enumerate() {
+            *s = 200.0 * (2.0 * core::f32::consts::PI * (i as f32) / period).sin();
         }
         // Fill enh_period with the matching pitch.
         for p in state.enh_period.iter_mut() {
             *p = period;
         }
 
-        let mut exc = vec![0.0f32; 160];
-        for i in 0..160 {
-            exc[i] = 200.0 * (2.0 * core::f32::consts::PI * ((i + ENH_BUFL) as f32) / period).sin();
-        }
+        let exc: Vec<f32> = (0..160)
+            .map(|i| 200.0 * (2.0 * core::f32::consts::PI * ((i + ENH_BUFL) as f32) / period).sin())
+            .collect();
         let mut out = vec![0.0f32; 160];
         enhance_frame(&mut state, FrameMode::Ms20, &exc, &mut out);
 

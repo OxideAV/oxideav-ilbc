@@ -64,9 +64,7 @@ pub fn quantise_lsf(lsf: &[f32; LPC_ORDER]) -> ([u16; 3], [f32; LPC_ORDER]) {
         let idx = nearest(s, &lsf[off..off + dim]);
         indices[s] = idx;
         let sub = lookup_split(s, idx);
-        for j in 0..dim {
-            qlsf[off + j] = sub[j];
-        }
+        qlsf[off..off + dim].copy_from_slice(&sub[..dim]);
     }
     (indices, qlsf)
 }

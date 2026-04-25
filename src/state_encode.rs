@@ -38,9 +38,9 @@ pub fn lpc_analysis_filter(
     out: &mut [f32],
 ) {
     debug_assert_eq!(input.len(), out.len());
-    for n in 0..input.len() {
-        // residual = sum_k a[k] * x(n-k), a[0]=1 implies +x(n).
-        let mut s = a[0] * input[n];
+    // RFC 3951 §3.2.3 LPC analysis filter A(z): e(n) = Σ a[k]·x(n-k).
+    for (n, &x_n) in input.iter().enumerate() {
+        let mut s = a[0] * x_n;
         for k in 1..=LPC_ORDER {
             s += a[k] * mem[k - 1];
         }
@@ -49,7 +49,7 @@ pub fn lpc_analysis_filter(
         for k in (1..LPC_ORDER).rev() {
             mem[k] = mem[k - 1];
         }
-        mem[0] = input[n];
+        mem[0] = x_n;
     }
 }
 
@@ -73,22 +73,23 @@ pub fn select_start_state(mode: FrameMode, residual: &[f32]) -> usize {
     let mut best_idx = 0usize;
     let mut best_val = f32::NEG_INFINITY;
     let pairs = n_sub - 1;
-    for nsub_1 in 0..pairs {
+    for (nsub_1, &bias) in en_win.iter().enumerate().take(pairs) {
         // ssqn over [nsub_1*SUBL .. (nsub_1+2)*SUBL), with triangular
-        // weighting on the first and last 5 samples.
+        // weighting on the first and last 5 samples (RFC 3951 §3.5.1).
         let mut ssqn = 0.0f32;
         let start = nsub_1 * SUBL;
         let end = start + 2 * SUBL;
-        for i in start..(start + 5) {
-            ssqn += SAMP_EN_WIN[i - start] * residual[i] * residual[i];
+        for (offset, &w) in SAMP_EN_WIN.iter().enumerate() {
+            let r = residual[start + offset];
+            ssqn += w * r * r;
         }
-        for i in (start + 5)..(end - 5) {
-            ssqn += residual[i] * residual[i];
+        for &r in &residual[(start + 5)..(end - 5)] {
+            ssqn += r * r;
         }
-        for i in (end - 5)..end {
-            ssqn += SAMP_EN_WIN[end - 1 - i] * residual[i] * residual[i];
+        for (offset, &w) in SAMP_EN_WIN.iter().rev().enumerate() {
+            let r = residual[end - 5 + offset];
+            ssqn += w * r * r;
         }
-        let bias = en_win[nsub_1];
         let score = bias * ssqn;
         if score > best_val {
             best_val = score;
@@ -113,12 +114,12 @@ pub fn select_position(mode: FrameMode, residual: &[f32], start_idx: usize) -> (
     let span_end = span_start + 2 * SUBL;
     let boundary = 2 * SUBL - n_short; // 23 or 22
     let mut e_last = 0.0f32;
-    for i in (span_end - boundary)..span_end {
-        e_last += residual[i] * residual[i];
+    for &r in &residual[(span_end - boundary)..span_end] {
+        e_last += r * r;
     }
     let mut e_first = 0.0f32;
-    for i in span_start..(span_start + boundary) {
-        e_first += residual[i] * residual[i];
+    for &r in &residual[span_start..(span_start + boundary)] {
+        e_first += r * r;
     }
     if e_last <= e_first {
         // Drop the trailing boundary.
@@ -139,8 +140,8 @@ pub fn allpass_forward(state_residual: &[f32], a: &[f32; LPC_ORDER + 1]) -> Vec<
     padded[..n].copy_from_slice(state_residual);
     let fout = crate::state::allpass_zero_pole(&padded, a);
     let mut ccres = vec![0.0f32; n];
-    for k in 0..n {
-        ccres[k] = fout[k] + fout[k + n];
+    for (k, c) in ccres.iter_mut().enumerate() {
+        *c = fout[k] + fout[k + n];
     }
     ccres
 }
@@ -247,9 +248,7 @@ mod tests {
     #[test]
     fn select_start_picks_high_energy() {
         let mut r = vec![0.0f32; FRAME_SAMPLES_20MS];
-        for i in 40..120 {
-            r[i] = 1000.0;
-        }
+        r[40..120].fill(1000.0);
         let idx = select_start_state(FrameMode::Ms20, &r);
         assert_eq!(idx, 1);
     }
@@ -257,9 +256,7 @@ mod tests {
     #[test]
     fn select_position_drops_low_energy_boundary() {
         let mut r = vec![0.0f32; FRAME_SAMPLES_20MS];
-        for i in 0..57 {
-            r[i] = 1000.0;
-        }
+        r[0..57].fill(1000.0);
         let (pos, lo, hi) = select_position(FrameMode::Ms20, &r, 0);
         assert_eq!(pos, 1);
         assert_eq!(lo, 0);
@@ -282,10 +279,9 @@ mod tests {
 
     #[test]
     fn encode_state_20ms_runs() {
-        let mut r = vec![0.0f32; FRAME_SAMPLES_20MS];
-        for i in 0..FRAME_SAMPLES_20MS {
-            r[i] = ((i as f32) * 0.3).sin() * 500.0;
-        }
+        let r: Vec<f32> = (0..FRAME_SAMPLES_20MS)
+            .map(|i| ((i as f32) * 0.3).sin() * 500.0)
+            .collect();
         let mut a = [0.0f32; LPC_ORDER + 1];
         a[0] = 1.0;
         let res = encode_state(FrameMode::Ms20, &r, &a);
@@ -306,8 +302,8 @@ mod tests {
         let mut mem = [0.0f32; LPC_ORDER];
         let mut out = vec![0.0f32; 40];
         lpc_analysis_filter(&input, &a, &mut mem, &mut out);
-        for i in 0..40 {
-            assert_eq!(out[i], input[i]);
+        for (got, expected) in out.iter().zip(input.iter()) {
+            assert_eq!(got, expected);
         }
     }
 }

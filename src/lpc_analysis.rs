@@ -39,8 +39,8 @@ pub fn hanning_window() -> [f32; LPC_WINLEN] {
     let mut w = [0.0f32; LPC_WINLEN];
     // Standard mirrored Hanning over 240 samples.
     let blockl = LPC_WINLEN as f32;
-    for i in 0..(LPC_WINLEN / 2) {
-        w[i] =
+    for (i, w_i) in w.iter_mut().enumerate().take(LPC_WINLEN / 2) {
+        *w_i =
             0.5 * (1.0 - (2.0 * core::f32::consts::PI * (i as f32 + 1.0) / (blockl + 1.0)).cos());
     }
     for i in (LPC_WINLEN / 2)..LPC_WINLEN {
@@ -57,13 +57,12 @@ pub fn hanning_window() -> [f32; LPC_WINLEN] {
 /// ```
 pub fn asymmetric_window() -> [f32; LPC_WINLEN] {
     let mut w = [0.0f32; LPC_WINLEN];
-    for i in 0..220 {
+    for (i, w_i) in w.iter_mut().enumerate().take(220) {
         let s = (core::f32::consts::PI * (i as f32 + 1.0) / 441.0).sin();
-        w[i] = s * s;
+        *w_i = s * s;
     }
-    for i in 220..LPC_WINLEN {
-        let v = ((i as f32 - 220.0) * core::f32::consts::PI / 40.0).cos();
-        w[i] = v;
+    for (i, w_i) in w.iter_mut().enumerate().take(LPC_WINLEN).skip(220) {
+        *w_i = ((i as f32 - 220.0) * core::f32::consts::PI / 40.0).cos();
     }
     w
 }
@@ -77,9 +76,9 @@ pub fn asymmetric_window() -> [f32; LPC_WINLEN] {
 pub fn lag_window() -> [f32; LPC_ORDER + 1] {
     let mut w = [0.0f32; LPC_ORDER + 1];
     w[0] = 1.0001;
-    for i in 1..=LPC_ORDER {
+    for (i, w_i) in w.iter_mut().enumerate().skip(1) {
         let x = 2.0 * core::f32::consts::PI * 60.0 * (i as f32) / 8000.0;
-        w[i] = (-0.5 * x * x).exp();
+        *w_i = (-0.5 * x * x).exp();
     }
     w
 }
@@ -148,8 +147,8 @@ pub fn levinson_durbin(r: &[f32; LPC_ORDER + 1]) -> [f32; LPC_ORDER + 1] {
 /// In-place chirp bandwidth expansion: a[i] *= chirp^i for i=0..=LPC_ORDER.
 pub fn chirp_expand(a: &mut [f32; LPC_ORDER + 1], chirp: f32) {
     let mut c = 1.0f32;
-    for k in 0..=LPC_ORDER {
-        a[k] *= c;
+    for a_k in a.iter_mut() {
+        *a_k *= c;
         c *= chirp;
     }
 }
@@ -157,8 +156,8 @@ pub fn chirp_expand(a: &mut [f32; LPC_ORDER + 1], chirp: f32) {
 /// Multiply autocorrelation coefficients by the lag window in-place.
 pub fn apply_lag_window(r: &mut [f32; LPC_ORDER + 1]) {
     let w = lag_window();
-    for i in 0..=LPC_ORDER {
-        r[i] *= w[i];
+    for (r_i, &w_i) in r.iter_mut().zip(w.iter()) {
+        *r_i *= w_i;
     }
 }
 
@@ -212,13 +211,13 @@ pub fn lpc_to_lsf(a: &[f32; LPC_ORDER + 1]) -> [f32; LPC_ORDER] {
     // roots, we search P first over the grid, then Q, alternating.
     let n_grid = 512;
     let mut grid = [0.0f64; 513];
-    for i in 0..=n_grid {
-        grid[i] = core::f64::consts::PI * (i as f64) / (n_grid as f64);
+    for (i, g) in grid.iter_mut().enumerate() {
+        *g = core::f64::consts::PI * (i as f64) / (n_grid as f64);
     }
     let eval = |coeffs: &[f64; LPC_ORDER + 2], omega: f64| -> f64 {
         let mut s = 0.0f64;
-        for k in 0..=(p + 1) {
-            s += coeffs[k] * (-(k as f64) * omega).cos();
+        for (k, &c) in coeffs.iter().enumerate().take(p + 2) {
+            s += c * (-(k as f64) * omega).cos();
             // Only real part matters for symmetric/antisymmetric on unit circle.
         }
         s
@@ -359,15 +358,9 @@ mod tests {
     #[test]
     fn lpc_to_lsf_monotone_for_impulse() {
         // Minimum phase stable LPC from a real-ish input.
-        let mut input = [0.0f32; LPC_WINLEN];
-        for i in 0..LPC_WINLEN {
-            input[i] = ((i as f32) * 0.1).sin() * 1000.0;
-        }
+        let input: [f32; LPC_WINLEN] = core::array::from_fn(|i| ((i as f32) * 0.1).sin() * 1000.0);
         let w = asymmetric_window();
-        let mut windowed = [0.0f32; LPC_WINLEN];
-        for i in 0..LPC_WINLEN {
-            windowed[i] = input[i] * w[i];
-        }
+        let windowed: [f32; LPC_WINLEN] = core::array::from_fn(|i| input[i] * w[i]);
         let a = block_lpc(&windowed);
         let lsf = lpc_to_lsf(&a);
         // Check monotone ordering.
