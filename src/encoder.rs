@@ -43,6 +43,7 @@ use crate::bitreader::CbStageIndices;
 use crate::bitwriter::{pack_frame, PackParams};
 use crate::cb::update_cb_memory;
 use crate::cb_search::{search_cb, search_cb_abs};
+use crate::hp_filter::{hp_input, HpInputState};
 use crate::lpc_analysis::{asymmetric_window, block_lpc, hanning_window, lpc_to_lsf, LPC_WINLEN};
 use crate::lsf::{decode_and_interpolate, dequant_lsf, LsfState};
 use crate::lsf_quant::quantise_lsf;
@@ -92,6 +93,14 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         _ => FrameMode::Ms20,
     };
 
+    // RFC 3951 §3.1: high-pass pre-processing is "if needed". Off by
+    // default; enable with `hp_filter=on` (or `1` / `true` / `yes`).
+    let hp_filter_on = params
+        .options
+        .get("hp_filter")
+        .map(|v| matches!(v, "1" | "on" | "true" | "yes"))
+        .unwrap_or(false);
+
     let mut output = params.clone();
     output.media_type = MediaType::Audio;
     output.sample_format = Some(SampleFormat::S16);
@@ -102,7 +111,7 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         FrameMode::Ms30 => 13_333,
     });
 
-    Ok(Box::new(IlbcEncoder::new(mode, output)))
+    Ok(Box::new(IlbcEncoder::new(mode, output, hp_filter_on)))
 }
 
 /// Internal encoder state.
@@ -124,13 +133,20 @@ struct IlbcEncoder {
     /// 147-sample adaptive codebook memory, kept in lockstep with the
     /// decoder's own `cb_mem`.
     cb_mem: [f32; CB_LMEM],
+    /// Input HP filter state — RFC 3951 §3.1. Applied to PCM at the
+    /// `send_frame` boundary so every downstream stage (lookback, LPC,
+    /// residual) sees a DC- and 50/60 Hz-suppressed signal. Only used
+    /// when `hp_filter_on` is true (RFC describes pre-processing as
+    /// optional, gated on the application's input characteristics).
+    hp_state: HpInputState,
+    hp_filter_on: bool,
     pending: VecDeque<Packet>,
     sample_pos: i64,
     eof: bool,
 }
 
 impl IlbcEncoder {
-    fn new(mode: FrameMode, output_params: CodecParameters) -> Self {
+    fn new(mode: FrameMode, output_params: CodecParameters, hp_filter_on: bool) -> Self {
         let lookback = vec![0.0f32; lookback_len(mode)];
         Self {
             output_params,
@@ -141,6 +157,8 @@ impl IlbcEncoder {
             lsf_state: LsfState::new(),
             lpc_mem: [0.0; LPC_ORDER],
             cb_mem: [0.0; CB_LMEM],
+            hp_state: HpInputState::default(),
+            hp_filter_on,
             pending: VecDeque::new(),
             sample_pos: 0,
             eof: false,
@@ -492,9 +510,24 @@ impl Encoder for IlbcEncoder {
         if bytes.len() % 2 != 0 {
             return Err(Error::invalid("iLBC encoder: odd byte count"));
         }
+        // Convert; optionally HP-filter (RFC 3951 §3.1 — opt-in, off by
+        // default since the spec describes it as conditional on the
+        // application's input characteristics).
+        let n = bytes.len() / 2;
+        let mut raw = Vec::with_capacity(n);
         for chunk in bytes.chunks_exact(2) {
-            let s = i16::from_le_bytes([chunk[0], chunk[1]]) as f32;
-            self.pcm_queue.push_back(s);
+            raw.push(i16::from_le_bytes([chunk[0], chunk[1]]) as f32);
+        }
+        if self.hp_filter_on {
+            let mut filtered = vec![0.0f32; n];
+            hp_input(&raw, &mut filtered, &mut self.hp_state);
+            for s in filtered {
+                self.pcm_queue.push_back(s);
+            }
+        } else {
+            for s in raw {
+                self.pcm_queue.push_back(s);
+            }
         }
         self.drain(false)
     }

@@ -32,6 +32,7 @@ pub mod codec;
 pub mod decoder;
 pub mod encoder;
 pub mod enhancer;
+pub mod hp_filter;
 pub mod lpc_analysis;
 pub mod lsf;
 pub mod lsf_quant;
