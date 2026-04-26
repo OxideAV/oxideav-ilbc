@@ -11,9 +11,7 @@
 //! Frame mode (20 ms / 30 ms) is inferred from the packet byte length.
 
 use oxideav_core::Decoder;
-use oxideav_core::{
-    AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result, SampleFormat, TimeBase,
-};
+use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result};
 
 use crate::bitreader::{parse_frame, FrameParams};
 use crate::cb::{construct_excitation, update_cb_memory};
@@ -61,7 +59,6 @@ struct IlbcDecoder {
     cb_mem: [f32; CB_LMEM],
     pending: Option<Packet>,
     eof: bool,
-    time_base: TimeBase,
 }
 
 impl IlbcDecoder {
@@ -74,7 +71,6 @@ impl IlbcDecoder {
             cb_mem: [0.0; CB_LMEM],
             pending: None,
             eof: false,
-            time_base: TimeBase::new(1, SAMPLE_RATE as i64),
         }
     }
 
@@ -243,12 +239,8 @@ impl Decoder for IlbcDecoder {
         // future mode-specific trailer/padding logic has a hook.
         let _ = mode;
         Ok(Frame::Audio(AudioFrame {
-            format: SampleFormat::S16,
-            channels: 1,
-            sample_rate: SAMPLE_RATE,
             samples: samples.len() as u32,
             pts: pkt.pts,
-            time_base: self.time_base,
             data: vec![bytes],
         }))
     }
@@ -273,6 +265,7 @@ impl Decoder for IlbcDecoder {
 mod tests {
     use super::*;
     use crate::{FRAME_BYTES_20MS, FRAME_BYTES_30MS};
+    use oxideav_core::TimeBase;
 
     fn make_dec() -> Box<dyn Decoder> {
         let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
@@ -317,8 +310,6 @@ mod tests {
             panic!("expected audio frame");
         };
         assert_eq!(a.samples, 160);
-        assert_eq!(a.channels, 1);
-        assert_eq!(a.sample_rate, SAMPLE_RATE);
         assert_eq!(a.data[0].len(), 160 * 2);
         for chunk in a.data[0].chunks_exact(2) {
             let s = i16::from_le_bytes([chunk[0], chunk[1]]);

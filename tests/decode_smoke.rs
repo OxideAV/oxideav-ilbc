@@ -33,8 +33,6 @@ fn registry_roundtrip_20ms() {
         panic!("audio frame expected");
     };
     assert_eq!(a.samples, 160);
-    assert_eq!(a.sample_rate, 8_000);
-    assert_eq!(a.channels, 1);
     // Ensure at least one non-zero sample is produced (sanity that the
     // pipeline is actually exercising the synthesis path).
     let any_nonzero = a.data[0]
@@ -59,7 +57,6 @@ fn registry_roundtrip_30ms() {
         panic!("audio frame expected");
     };
     assert_eq!(a.samples, 240);
-    assert_eq!(a.sample_rate, 8_000);
 }
 
 /// Deterministic fingerprint: the same payload must always produce the

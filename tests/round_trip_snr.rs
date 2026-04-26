@@ -48,12 +48,8 @@ fn pcm_to_audio_frame(pcm: &[i16]) -> Frame {
         bytes.extend_from_slice(&s.to_le_bytes());
     }
     Frame::Audio(AudioFrame {
-        format: SampleFormat::S16,
-        channels: 1,
-        sample_rate: SAMPLE_RATE,
         samples: pcm.len() as u32,
         pts: Some(0),
-        time_base: TimeBase::new(1, SAMPLE_RATE as i64),
         data: vec![bytes],
     })
 }

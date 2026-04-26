@@ -495,14 +495,6 @@ impl Encoder for IlbcEncoder {
             Frame::Audio(a) => a,
             _ => return Err(Error::invalid("iLBC encoder: audio frames only")),
         };
-        if af.channels != 1 || af.sample_rate != SAMPLE_RATE {
-            return Err(Error::invalid("iLBC encoder: input must be mono, 8000 Hz"));
-        }
-        if af.format != SampleFormat::S16 {
-            return Err(Error::invalid(
-                "iLBC encoder: input sample format must be S16",
-            ));
-        }
         let bytes = af
             .data
             .first()
@@ -582,12 +574,8 @@ mod tests {
         let samples = 3 * 160;
         let bytes = vec![0u8; samples * 2];
         let af = AudioFrame {
-            format: SampleFormat::S16,
-            channels: 1,
-            sample_rate: SAMPLE_RATE,
             samples: samples as u32,
             pts: Some(0),
-            time_base: TimeBase::new(1, SAMPLE_RATE as i64),
             data: vec![bytes],
         };
         enc.send_frame(&Frame::Audio(af)).unwrap();
@@ -605,12 +593,8 @@ mod tests {
         let samples = 2 * 240;
         let bytes = vec![0u8; samples * 2];
         let af = AudioFrame {
-            format: SampleFormat::S16,
-            channels: 1,
-            sample_rate: SAMPLE_RATE,
             samples: samples as u32,
             pts: Some(0),
-            time_base: TimeBase::new(1, SAMPLE_RATE as i64),
             data: vec![bytes],
         };
         enc.send_frame(&Frame::Audio(af)).unwrap();
