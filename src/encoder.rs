@@ -42,7 +42,7 @@ use oxideav_core::{
 use crate::bitreader::CbStageIndices;
 use crate::bitwriter::{pack_frame, PackParams};
 use crate::cb::update_cb_memory;
-use crate::cb_search::{search_cb, search_cb_abs};
+use crate::cb_search::{search_cb_abs, search_cb_capped};
 use crate::hp_filter::{hp_input, HpInputState};
 use crate::lpc_analysis::{asymmetric_window, block_lpc, hanning_window, lpc_to_lsf, LPC_WINLEN};
 use crate::lsf::{decode_and_interpolate, dequant_lsf, LsfState};
@@ -289,8 +289,13 @@ impl IlbcEncoder {
         while target_boundary.len() < boundary_samples {
             target_boundary.push(0.0);
         }
+        // Per RFC 3951 §3.6.1 the boundary block uses lMem = 85 samples
+        // (not the full 147), so the search runs against the last 85
+        // entries of the CB memory; per Table 3.1 each stage has 128
+        // entries (64 base + 64 expanded), so the cap is 128 throughout.
+        let boundary_mem = &self.cb_mem[CB_LMEM - 85..];
         let (boundary_res, boundary_rec) =
-            search_cb(&self.cb_mem, boundary_samples, &target_boundary);
+            search_cb_capped(boundary_mem, boundary_samples, &target_boundary, &[128; 3]);
         // Update cb_mem / state_vec exactly as the decoder will. The
         // decoder adds `boundary_exc[i]` to `excitation[STATE_LEN -
         // boundary_samples + i]` and also pushes `boundary_exc` as a
@@ -300,55 +305,15 @@ impl IlbcEncoder {
         boundary_block[..copy_n].copy_from_slice(&boundary_rec[..copy_n]);
         update_cb_memory(&mut self.cb_mem, &boundary_block);
 
-        // ---- 6. Remaining 40-sample sub-blocks: analysis-by-synthesis ----
-        // For each 40-sample sub-block the encoder searches for the
-        // excitation whose zero-state response of `1/A(z)` best matches
-        // the *PCM* target (input - ZIR). This is strictly better than
-        // residual-domain matching when the decoder's filter memory
-        // drifts from the encoder's input history.
+        // ---- 6. Remaining 40-sample sub-blocks: residual-domain CB search ----
+        // RFC 3951 §3.6 (and the reference `iCBSearch` in Appendix A.34) does
+        // the codebook search in the residual domain — target = LPC residual,
+        // codebook memory = previously-decoded residual. Our `search_cb`
+        // reproduces that flow; the perceptual weighting filter is omitted
+        // (it is OPTIONAL per RFC §3.4) which makes the search identical to
+        // the reference's behaviour with the weighting filter set to identity.
         let n_cb_sub = mode.cb_sub_blocks();
         let mut sub_block_indices = Vec::with_capacity(n_cb_sub);
-        // Running synth memory for the analysis-by-synthesis loop. It
-        // starts at the state-sub-block boundary: the decoder's synth
-        // mem at sub-block 2's start is whatever 1/A(z) produces from
-        // excitation[0..80] = state_vec + boundary. We compute that here.
-        let mut synth_mem;
-        {
-            // Run 1/A(z) from zero mem through state_vec to get synth_mem.
-            // This approximates the decoder's synth memory at sub-block 2's
-            // start. Using a_per_sub[0] for sub-blocks 0-1 (two halves).
-            let mut tmp_mem = [0.0f32; LPC_ORDER];
-            for (sb, a) in a_per_sub.iter().enumerate().take(2.min(mode.sub_blocks())) {
-                let sb_start = sb * SUBL;
-                let mut exc = [0.0f32; SUBL];
-                // Build the excitation the decoder uses for this state
-                // sub-block.
-                for (i, e) in exc.iter_mut().enumerate() {
-                    if sb_start + i < STATE_LEN {
-                        *e = state_vec[sb_start + i];
-                    }
-                    if sb_start + i >= STATE_LEN - boundary_samples && sb_start + i < STATE_LEN {
-                        let b_off = sb_start + i - (STATE_LEN - boundary_samples);
-                        if b_off < boundary_samples.min(SUBL) {
-                            *e += boundary_rec[b_off];
-                        }
-                    }
-                }
-                // RFC 3951 §4.7 eq.: y(n) = x(n) - Σ a[k]·y(n-k), 1≤k≤LPC_ORDER.
-                #[allow(clippy::needless_range_loop)] // RFC 3951 §4.7 LPC synthesis
-                for n in 0..SUBL {
-                    let mut s = exc[n];
-                    for k in 1..=LPC_ORDER {
-                        s -= a[k] * tmp_mem[k - 1];
-                    }
-                    for k in (1..LPC_ORDER).rev() {
-                        tmp_mem[k] = tmp_mem[k - 1];
-                    }
-                    tmp_mem[0] = s;
-                }
-            }
-            synth_mem = tmp_mem;
-        }
         for cb_i in 0..n_cb_sub {
             let sb = 2 + cb_i;
             let lo = sb * SUBL;
@@ -357,51 +322,30 @@ impl IlbcEncoder {
                 sub_block_indices.push(CbStageIndices::default());
                 continue;
             }
-            let a = &a_per_sub[sb];
-            // Compute zero-input response (ZIR) of 1/A(z) for this
-            // sub-block given `synth_mem`. RFC 3951 §4.7.
-            let zir = {
-                let mut mem = synth_mem;
-                let mut out = [0.0f32; SUBL];
-                for out_n in out.iter_mut() {
-                    let mut s = 0.0f32;
-                    for k in 1..=LPC_ORDER {
-                        s -= a[k] * mem[k - 1];
-                    }
-                    *out_n = s;
-                    for k in (1..LPC_ORDER).rev() {
-                        mem[k] = mem[k - 1];
-                    }
-                    mem[0] = s;
-                }
-                out
-            };
-            // PCM target = input - ZIR.
-            let pcm_target: [f32; SUBL] = core::array::from_fn(|i| frame_pcm[lo + i] - zir[i]);
-            let (res, excitation) = search_cb_abs(&self.cb_mem, a, &pcm_target);
-            // Advance synth_mem using the PCM output = ZIR + ZSR(excitation).
-            // We compute the actual output sample-by-sample. RFC 3951 §4.7.
-            let mut mem = synth_mem;
-            for &exc_n in excitation.iter() {
-                let mut s = exc_n;
-                for k in 1..=LPC_ORDER {
-                    s -= a[k] * mem[k - 1];
-                }
-                for k in (1..LPC_ORDER).rev() {
-                    mem[k] = mem[k - 1];
-                }
-                mem[0] = s;
-            }
-            synth_mem = mem;
-            update_cb_memory(&mut self.cb_mem, &excitation);
+            // Per Table 3.2, the FIRST 40-sample sub-block after the state
+            // (`cb_i == 0`) has codebook size 128 for stages 1 and 2 (8/7/7
+            // bits); subsequent sub-blocks have 256 for all stages. We cap
+            // the search range here so the encoder never picks an index it
+            // cannot encode.
+            let stage12_cap = if cb_i == 0 { 128usize } else { 256usize };
+            let target: [f32; SUBL] = core::array::from_fn(|i| residual[lo + i]);
+            let (res, excitation) = search_cb_capped(
+                &self.cb_mem,
+                SUBL,
+                &target,
+                &[256, stage12_cap, stage12_cap],
+            );
+            let mut exc_arr = [0.0f32; SUBL];
+            exc_arr.copy_from_slice(&excitation);
+            update_cb_memory(&mut self.cb_mem, &exc_arr);
             sub_block_indices.push(CbStageIndices {
                 cb_idx: res.cb_idx,
                 gain_idx: res.gain_idx,
             });
         }
-        // Silence the "unused" warning in case the simpler search is
-        // re-enabled later.
-        let _ = search_cb;
+        // Silence the "unused" warning in case the analysis-by-synthesis
+        // search is re-enabled later.
+        let _ = search_cb_abs;
 
         // ---- 7. Pack ----
         let params = PackParams {

@@ -258,6 +258,27 @@ pub fn construct_excitation(
     exc
 }
 
+/// Build the decoded excitation for one sub-block of arbitrary length
+/// (`cbveclen`), drawing from `cb_mem` of arbitrary length. Used for the
+/// 22-/23-sample boundary block which the RFC explicitly defines on a
+/// shorter `lMem = 85` codebook memory (§3.6.1).
+pub fn construct_excitation_veclen(
+    cb_mem: &[f32],
+    cbveclen: usize,
+    cb_idx: &[u16; 3],
+    gain_idx: &[u8; 3],
+) -> Vec<f32> {
+    let gains = decode_gains(gain_idx);
+    let mut exc = vec![0.0f32; cbveclen];
+    for stage in 0..3 {
+        let v = extract_cbvec_veclen(cb_mem, cb_idx[stage], cbveclen);
+        for (e, &v_n) in exc.iter_mut().zip(v.iter()) {
+            *e += gains[stage] * v_n;
+        }
+    }
+    exc
+}
+
 /// Update the adaptive codebook memory: shift left by `SUBL` and
 /// append `new_excitation` at the tail.
 pub fn update_cb_memory(cb_mem: &mut [f32; CB_LMEM], new_excitation: &[f32; SUBL]) {

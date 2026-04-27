@@ -25,8 +25,10 @@ pub const LPC_LOOKBACK_30MS: usize = 60;
 /// Window length: BLOCKL + lookback. 240 samples for both modes.
 pub const LPC_WINLEN: usize = 240;
 
-/// Chirp bandwidth-expansion factor recommended by the RFC (§3.2.2).
-pub const LPC_CHIRP: f32 = 0.9;
+/// Chirp bandwidth-expansion factor. RFC 3951 §3.2.2 recommends 0.9; the
+/// reference encoder in Appendix A.34 uses `LPC_CHIRP_SYNTDENUM = 0.9025`
+/// (`bwexpand(lp2, lp, LPC_CHIRP_SYNTDENUM, ...)` before LSF conversion).
+pub const LPC_CHIRP: f32 = 0.9025;
 
 /// Symmetric Hanning window (240 samples) — RFC 3951 §3.2.1 `lpc_winTbl`.
 ///

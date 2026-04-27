@@ -150,7 +150,7 @@ fn round_trip_sine_20ms() {
         "round_trip_20ms_sine: SNR = {:.2} dB (aligned = {:.2} dB)",
         snr, snr_aligned
     );
-    assert!(snr > 0.0, "round-trip SNR not positive: {}", snr);
+    assert!(snr > 20.0, "20 ms sine SNR below 20 dB target: {}", snr);
 }
 
 /// Per-frame best-lag SNR average, skipping warm-up frames. This is
@@ -199,7 +199,10 @@ fn round_trip_voiced_20ms() {
         "round_trip_20ms_voiced: per-frame best-lag avg SNR = {:.2} dB",
         avg
     );
-    assert!(avg > 8.0, "20 ms voiced SNR below target: {}", avg);
+    // Round 19 floor: residual-domain CB search + bit-width caps + RFC §4.7
+    // synth-shift puts us comfortably above the speech-codec range. Lock in
+    // 18 dB so future regressions are caught immediately.
+    assert!(avg > 18.0, "20 ms voiced SNR below 18 dB target: {}", avg);
 }
 
 #[test]
@@ -214,7 +217,8 @@ fn round_trip_voiced_30ms() {
         "round_trip_30ms_voiced: per-frame best-lag avg SNR = {:.2} dB",
         avg
     );
-    assert!(avg > 8.0, "30 ms voiced SNR below target: {}", avg);
+    // Round 19 floor — see comment in `round_trip_voiced_20ms`.
+    assert!(avg > 20.0, "30 ms voiced SNR below 20 dB target: {}", avg);
 }
 
 #[test]
@@ -226,5 +230,5 @@ fn round_trip_sine_30ms() {
     let aligned = &decoded[skip..skip + (pcm.len() - skip)];
     let snr = best_snr_db(&pcm[skip..], aligned, 240);
     println!("round_trip_30ms_sine: best-lag SNR = {:.2} dB", snr);
-    assert!(snr > 0.0, "30ms SNR not positive: {}", snr);
+    assert!(snr > 22.0, "30 ms sine SNR below 22 dB target: {}", snr);
 }

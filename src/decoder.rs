@@ -14,7 +14,7 @@ use oxideav_core::Decoder;
 use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result};
 
 use crate::bitreader::{parse_frame, FrameParams};
-use crate::cb::{construct_excitation, update_cb_memory};
+use crate::cb::{construct_excitation, construct_excitation_veclen, update_cb_memory};
 use crate::enhancer::{enhance_frame, EnhancerState};
 use crate::lsf::{decode_and_interpolate, dequant_lsf, LsfState};
 use crate::state::reconstruct_scalar_state;
@@ -57,18 +57,28 @@ struct IlbcDecoder {
     enhancer: EnhancerState,
     /// 147-sample adaptive-codebook memory (RFC §4.3 `CB_LMEM`).
     cb_mem: [f32; CB_LMEM],
+    /// Previous frame's per-sub-block LPC denominators, used by the
+    /// enhancer-delay-aware synthesis filtering of RFC §4.7. Holds at
+    /// least the last `mode.sub_blocks()` rows of the previous frame.
+    old_a_per_sub: Vec<[f32; LPC_ORDER + 1]>,
     pending: Option<Packet>,
     eof: bool,
 }
 
 impl IlbcDecoder {
     fn new() -> Self {
+        // Seed `old_a_per_sub` with identity LPC rows so the very first
+        // frame's enhancer-delay shift uses a pass-through filter where
+        // the previous-frame LPC would normally apply.
+        let mut identity = [0.0f32; LPC_ORDER + 1];
+        identity[0] = 1.0;
         Self {
             codec_id: CodecId::new(CODEC_ID_STR),
             lsf_state: LsfState::new(),
             synth: SynthState::new(),
             enhancer: EnhancerState::new(),
             cb_mem: [0.0; CB_LMEM],
+            old_a_per_sub: vec![identity; 6],
             pending: None,
             eof: false,
         }
@@ -134,8 +144,30 @@ impl IlbcDecoder {
         // boundary CB block is used both as the CB-memory seed and to
         // fill any residual bump in the state — we fold its energy
         // into the second half of the state vector.
-        let boundary_exc =
-            construct_excitation(&self.cb_mem, &fp.boundary.cb_idx, &fp.boundary.gain_idx);
+        //
+        // RFC 3951 §3.6.1: the boundary block uses lMem = 85 (not 147),
+        // i.e. the search/extract operates on the last 85 entries of the
+        // 147-sample codebook memory.
+        let boundary_mem = &self.cb_mem[CB_LMEM - 85..];
+        let boundary_full = construct_excitation_veclen(
+            boundary_mem,
+            match fp.mode {
+                FrameMode::Ms20 => 23,
+                FrameMode::Ms30 => 22,
+            },
+            &fp.boundary.cb_idx,
+            &fp.boundary.gain_idx,
+        );
+        // For consistency with the prior behaviour (which seeded a full
+        // SUBL excitation into the CB memory after the boundary block),
+        // we expand the boundary excitation to a SUBL-sized vector by
+        // zero-padding.
+        let boundary_exc: [f32; SUBL] = {
+            let mut arr = [0.0f32; SUBL];
+            let copy = boundary_full.len().min(SUBL);
+            arr[..copy].copy_from_slice(&boundary_full[..copy]);
+            arr
+        };
         // Copy the state vector into the first two sub-blocks of
         // excitation. The `position` bit selects whether the boundary
         // CB samples prepend or append the scalar state; we treat them
@@ -177,8 +209,37 @@ impl IlbcDecoder {
         let mut enhanced = vec![0.0f32; excitation.len()];
         enhance_frame(&mut self.enhancer, fp.mode, &excitation, &mut enhanced);
 
+        // Build the per-sub-block LPC list with the §4.7 enhancer-delay
+        // shift: for 20 ms (NSUB=4) the synthesis sub-block i uses the
+        // previous frame's LPC for i==0 and the current frame's LPC[i-1]
+        // for i in 1..NSUB. For 30 ms (NSUB=6), sub-blocks 0 and 1 use
+        // the previous frame's LPC and sub-blocks 2..NSUB use the current
+        // frame's LPC[i-2]. Reference: RFC 3951 Appendix A.5 (decoder).
+        let shift = match fp.mode {
+            FrameMode::Ms20 => 1usize,
+            FrameMode::Ms30 => 2usize,
+        };
+        let mut shifted_a = Vec::with_capacity(n_sub);
+        for i in 0..n_sub {
+            if i < shift {
+                // Use the previous frame's LPC at offset (i + n_sub - shift).
+                let off = i + n_sub - shift;
+                let row = self.old_a_per_sub.get(off).copied().unwrap_or_else(|| {
+                    let mut id = [0.0f32; LPC_ORDER + 1];
+                    id[0] = 1.0;
+                    id
+                });
+                shifted_a.push(row);
+            } else {
+                shifted_a.push(a_per_sub[i - shift]);
+            }
+        }
+
         // Synthesise from the enhanced excitation.
-        synthesise_frame(&enhanced, &a_per_sub, &mut self.synth, out);
+        synthesise_frame(&enhanced, &shifted_a, &mut self.synth, out);
+        // Cache the current frame's LPC rows so the next frame's first
+        // sub-blocks can use them per the enhancer-delay shift above.
+        self.old_a_per_sub = a_per_sub;
         self.enhancer.prev_enh_pl = 0;
         Ok(())
     }
@@ -255,6 +316,9 @@ impl Decoder for IlbcDecoder {
         self.synth.reset();
         self.enhancer.reset();
         self.cb_mem = [0.0; CB_LMEM];
+        let mut id = [0.0f32; LPC_ORDER + 1];
+        id[0] = 1.0;
+        self.old_a_per_sub = vec![id; 6];
         self.pending = None;
         self.eof = false;
         Ok(())

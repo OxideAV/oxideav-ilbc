@@ -57,12 +57,22 @@ PTS at the 8 kHz time base.
 - Decoder: full bit-unpack, split-VQ LSF dequant + stability + linear
   interpolation, start-state reconstruction with all-pass phase
   compensator, 3-stage adaptive codebook excitation with successive-
-  rescaled gain dequantisation, 10th-order LPC synthesis, dampened
-  pitch-synchronous PLC for lost / empty-indicated frames.
-- The RFC's enhancer (§4.6) is **not** mandatory for interoperability;
-  this crate ships a simplified pitch-emphasis variant good enough for
-  voiced-speech clarity without risking over-enhancement.
-- Encoder: not implemented. Decoder-only crate.
+  rescaled gain dequantisation, 10th-order LPC synthesis with the
+  RFC 3951 §4.7 enhancer-delay shift (1 sub-block for 20 ms, 2 for 30 ms),
+  dampened pitch-synchronous PLC for lost / empty-indicated frames.
+- §4.6 RFC-proper enhancer (six-PSSQ pitch-synchronous combiner with the
+  Lagrange-constraint optimisation from §4.6.4 / §4.6.5).
+- Encoder: LPC analysis (asymmetric / Hanning windowing → autocorrelation
+  → Levinson-Durbin → 0.9025 chirp expansion → LSF), split-VQ LSF
+  quantisation, scalar start-state coding (3-bit shape + 6-bit log scale),
+  residual-domain 3-stage codebook search per RFC §3.6 with bit-width
+  caps from Table 3.2 / Table 3.1.
+- Self-roundtrip SNR (synthetic voiced @ 130 Hz + 4 harmonics, ~1 s):
+  - 20 ms: **22.1 dB**
+  - 30 ms: **24.5 dB**
+- Self-roundtrip SNR (sine):
+  - 20 ms 400 Hz: **24.8 dB**
+  - 30 ms 300 Hz: **26.5 dB**
 
 ### Deviations from RFC 3951
 

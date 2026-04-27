@@ -110,16 +110,63 @@ fn quantise_gain2(gain: f32, prev_abs: f32) -> (u8, f32) {
     (best, GAIN_SQ3_TBL[best as usize] * scale)
 }
 
-/// Find the codebook vector that maximises `(target·cbvec)^2 / ||cbvec||^2`
-/// subject to the stage-0 constraint `target·cbvec > 0` and a gain
-/// magnitude cap. Returns (best_idx, best_gain, best_vec).
-fn search_stage(
+/// Multistage codebook search. Searches 3 stages, updating the target
+/// after each one. Also reconstructs the excitation sub-block exactly
+/// as the decoder would from the chosen indices.
+pub fn search_cb(cb_mem: &[f32], cbveclen: usize, target: &[f32]) -> (CbSearchResult, Vec<f32>) {
+    search_cb_capped(cb_mem, cbveclen, target, &[usize::MAX; 3])
+}
+
+/// Same as [`search_cb`] but with a per-stage cap on the search index
+/// range. Use this where the bitstream allocates fewer bits to a stage
+/// than the natural codebook size (per RFC 3951 Table 3.1 / Table 3.2).
+///
+/// `caps[k]` limits stage `k`'s search to indices `0..caps[k].min(total)`.
+pub fn search_cb_capped(
+    cb_mem: &[f32],
+    cbveclen: usize,
+    target: &[f32],
+    caps: &[usize; 3],
+) -> (CbSearchResult, Vec<f32>) {
+    debug_assert_eq!(target.len(), cbveclen);
+
+    let mut t = target.to_vec();
+    let mut cb_idx = [0u16; 3];
+    let mut gain_idx = [0u8; 3];
+    let mut reconstructed = vec![0.0f32; cbveclen];
+    let mut prev_abs = 1.0f32;
+
+    for stage in 0..3 {
+        let stage0 = stage == 0;
+        let (idx, gain, vec) = search_stage_capped(cb_mem, cbveclen, &t, stage0, caps[stage]);
+        cb_idx[stage] = idx;
+        let (g_idx, g_deq) = match stage {
+            0 => quantise_gain0(gain),
+            1 => quantise_gain1(gain, prev_abs),
+            _ => quantise_gain2(gain, prev_abs),
+        };
+        gain_idx[stage] = g_idx;
+        prev_abs = g_deq.abs();
+        // Subtract the quantised-gain contribution from the target,
+        // and add it to the reconstruction.
+        for n in 0..cbveclen {
+            t[n] -= g_deq * vec[n];
+            reconstructed[n] += g_deq * vec[n];
+        }
+    }
+
+    (CbSearchResult { cb_idx, gain_idx }, reconstructed)
+}
+
+/// As [`search_stage`] but limit the search range to `cap` candidates.
+fn search_stage_capped(
     cb_mem: &[f32],
     cbveclen: usize,
     target: &[f32],
     stage0: bool,
+    cap: usize,
 ) -> (u16, f32, Vec<f32>) {
-    let total = total_cb_size(cb_mem.len(), cbveclen);
+    let total = total_cb_size(cb_mem.len(), cbveclen).min(cap);
     let mut best_idx = 0u16;
     let mut best_measure = f32::NEG_INFINITY;
     let mut best_gain = 0.0f32;
@@ -144,63 +191,18 @@ fn search_stage(
             continue;
         }
         let measure = (dot * dot) / nrm;
-        let signed_measure = if stage0 {
-            // Stage 0 requires dot>0, so measure is positive by
-            // construction.
-            measure
-        } else {
-            // Stages 1/2: the measure is `dot^2/nrm`, always positive,
-            // but we'd like to reward both positive and negative
-            // contributions the same. Use the unsigned measure.
-            measure
-        };
-        if signed_measure > best_measure {
-            best_measure = signed_measure;
+        if measure > best_measure {
+            best_measure = measure;
             best_idx = i as u16;
             best_gain = gain;
             best_vec = v;
         }
     }
     if best_measure.is_infinite() {
-        // No valid candidate — fall back to the first vector with gain 0.
         let v = extract_cbvec_veclen(cb_mem, 0, cbveclen);
         return (0, 0.0, v);
     }
     (best_idx, best_gain, best_vec)
-}
-
-/// Multistage codebook search. Searches 3 stages, updating the target
-/// after each one. Also reconstructs the excitation sub-block exactly
-/// as the decoder would from the chosen indices.
-pub fn search_cb(cb_mem: &[f32], cbveclen: usize, target: &[f32]) -> (CbSearchResult, Vec<f32>) {
-    debug_assert_eq!(target.len(), cbveclen);
-
-    let mut t = target.to_vec();
-    let mut cb_idx = [0u16; 3];
-    let mut gain_idx = [0u8; 3];
-    let mut reconstructed = vec![0.0f32; cbveclen];
-    let mut prev_abs = 1.0f32;
-
-    for stage in 0..3 {
-        let stage0 = stage == 0;
-        let (idx, gain, vec) = search_stage(cb_mem, cbveclen, &t, stage0);
-        cb_idx[stage] = idx;
-        let (g_idx, g_deq) = match stage {
-            0 => quantise_gain0(gain),
-            1 => quantise_gain1(gain, prev_abs),
-            _ => quantise_gain2(gain, prev_abs),
-        };
-        gain_idx[stage] = g_idx;
-        prev_abs = g_deq.abs();
-        // Subtract the quantised-gain contribution from the target,
-        // and add it to the reconstruction.
-        for n in 0..cbveclen {
-            t[n] -= g_deq * vec[n];
-            reconstructed[n] += g_deq * vec[n];
-        }
-    }
-
-    (CbSearchResult { cb_idx, gain_idx }, reconstructed)
 }
 
 /// Search a 40-sample sub-block. Convenience wrapper for the main path.

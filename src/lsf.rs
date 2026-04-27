@@ -185,28 +185,28 @@ pub fn decode_and_interpolate(
         }
         FrameMode::Ms30 => {
             // Two LSF vectors: lsf1 (first half) and lsf2 (second half).
-            // §3.2.6: sub-block 1 = mean(prev_tail, lsf1); sub-blocks 2..5
-            // interpolate between lsf1 and lsf2; sub-block 6 = lsf2.
+            // RFC 3951 reference `SimpleInterpolateLSF` (Appendix A.36) uses
+            // `lsf_weightTbl_30ms = [1/2, 1, 2/3, 1/3, 0, 0]` with the
+            // convention `out = coef * old + (1 - coef) * new`:
+            //   sub-block 0: 1/2 * lsfold + 1/2 * lsf1
+            //   sub-block 1: 1   * lsf1   + 0   * lsf2  (== lsf1)
+            //   sub-block 2: 2/3 * lsf1   + 1/3 * lsf2
+            //   sub-block 3: 1/3 * lsf1   + 2/3 * lsf2
+            //   sub-block 4: 0   * lsf1   + 1   * lsf2  (== lsf2)
+            //   sub-block 5: 0   * lsf1   + 1   * lsf2  (== lsf2)
+            const W30: [f32; 6] = [0.5, 1.0, 2.0 / 3.0, 1.0 / 3.0, 0.0, 0.0];
             let lsf1 = &lsf_vectors[0];
             let lsf2 = &lsf_vectors[1];
-            // Sub-block 0 (the "first sub-block" in the RFC) is the
-            // average.
-            let lsf_sb0 = interpolate(&state.last_lsf, lsf1, 0.5);
+            // Sub-block 0 averages prev tail with lsf1.
+            let lsf_sb0 = interpolate(&state.last_lsf, lsf1, 1.0 - W30[0]);
             a_per_sub.push(lsf_to_lpc(&lsf_sb0));
-            // Sub-blocks 1..4 interpolate between lsf1 and lsf2.
-            // The RFC says 2..5 linearly interpolate, with sub-block 2
-            // = lsf1 and sub-block 5 = lsf2. We have 6 sub-blocks total
-            // (indices 0..5). We already handled sub-block 0. Now
-            // sub-blocks 1..4 linearly interpolate, with alpha = (n)/4
-            // for n=0..3, i.e. alpha ∈ {0, 1/4, 2/4, 3/4}. Finally
-            // sub-block 5 = lsf2.
-            for n in 0..(n_sub - 2) {
-                let alpha = (n as f32) / ((n_sub - 2) as f32);
-                let lsf_k = interpolate(lsf1, lsf2, alpha);
+            // Sub-blocks 1..5 interpolate between lsf1 (old) and lsf2 (new).
+            // `interpolate(a, b, alpha)` returns `(1-alpha)*a + alpha*b`,
+            // so to mix `coef*lsf1 + (1-coef)*lsf2` we pass `alpha = 1 - coef`.
+            for &coef in &W30[1..] {
+                let lsf_k = interpolate(lsf1, lsf2, 1.0 - coef);
                 a_per_sub.push(lsf_to_lpc(&lsf_k));
             }
-            // Final sub-block uses lsf2 outright.
-            a_per_sub.push(lsf_to_lpc(lsf2));
             state.last_lsf = *lsf2;
         }
     }
