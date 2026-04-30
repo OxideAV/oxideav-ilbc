@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (round 20 — RFC §3.7 gain correction)
+
+- Encoder now applies the RFC 3951 §3.7 "Gain Correction Encoding"
+  post-pass after every 3-stage codebook search (boundary block + each
+  40-sample CB sub-block). The pass bumps `gain_idx[0]` upward (capped
+  at 2× the originally-quantised value) until the reconstructed-
+  excitation energy approaches the target energy, fixing the systematic
+  energy loss that the squared-error CB search introduces on
+  unvoiced/noise-like input. Reference: RFC 3951 §3.7 + Appendix A.34
+  (`iCBSearch`, lines 9050-9065).
+- Encoder also applies the §4.7 enhancer-delay LPC shift to its
+  residual generation: sub-block `i` of the current frame is now
+  filtered by `shifted_a[i]` (= old frame's tail rows for `i < shift`,
+  current `a_per_sub[i - shift]` for `i >= shift`), mirroring the
+  decoder's synthesis exactly. The state-encoding all-pass continues
+  to use `a_per_sub[0]` (matching the decoder's `a_first`).
+- New `search_cb_capped_with_gain_correction` and (currently dormant)
+  `search_cb_weighted_with_gain_correction` helpers in `cb_search.rs`.
+  The latter mirrors RFC §3.6.2 perceptual weighting (Wk(z) =
+  1/Ak(z/0.4222)) — kept for future tuning but disabled because it
+  trades waveform SNR for perceptual quality on synthetic signals.
+
+### Self-roundtrip SNR (synthetic voiced + sine)
+
+|              | sine 20 ms | sine 30 ms | voiced 20 ms | voiced 30 ms |
+| ------------ | ---------- | ---------- | ------------ | ------------ |
+| Round 19 (prior) | 24.81 dB | 26.54 dB | 22.14 dB | 24.53 dB |
+| Round 20         | 24.81 dB | 26.53 dB | 22.26 dB | 24.73 dB |
+| Δ                | +0.00    | -0.01    | +0.12    | +0.20    |
+
+Test thresholds bumped to `> 24 / > 26 / > 22 / > 24.5` dB to lock the
+new floor.
+
 ### Changed (round 19 — encoder/decoder fidelity)
 
 - Encoder switched from PCM-domain analysis-by-synthesis to RFC 3951 §3.6

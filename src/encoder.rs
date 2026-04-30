@@ -42,7 +42,7 @@ use oxideav_core::{
 use crate::bitreader::CbStageIndices;
 use crate::bitwriter::{pack_frame, PackParams};
 use crate::cb::update_cb_memory;
-use crate::cb_search::{search_cb_abs, search_cb_capped};
+use crate::cb_search::{search_cb_abs, search_cb_capped_with_gain_correction};
 use crate::hp_filter::{hp_input, HpInputState};
 use crate::lpc_analysis::{asymmetric_window, block_lpc, hanning_window, lpc_to_lsf, LPC_WINLEN};
 use crate::lsf::{decode_and_interpolate, dequant_lsf, LsfState};
@@ -133,6 +133,14 @@ struct IlbcEncoder {
     /// 147-sample adaptive codebook memory, kept in lockstep with the
     /// decoder's own `cb_mem`.
     cb_mem: [f32; CB_LMEM],
+    /// Previous frame's per-sub-block LPC denominators. Mirrors the
+    /// decoder's `old_a_per_sub`: the §4.7 enhancer-delay shift means
+    /// the FIRST `shift` sub-blocks of the current frame are synthesised
+    /// (in the decoder) with the *previous* frame's tail LPC rows. To
+    /// keep the encoder's analysis filter aligned with what the decoder
+    /// will resynthesise, we apply the same shift to the encoder-side
+    /// residual generation.
+    old_a_per_sub: Vec<[f32; LPC_ORDER + 1]>,
     /// Input HP filter state — RFC 3951 §3.1. Applied to PCM at the
     /// `send_frame` boundary so every downstream stage (lookback, LPC,
     /// residual) sees a DC- and 50/60 Hz-suppressed signal. Only used
@@ -148,6 +156,10 @@ struct IlbcEncoder {
 impl IlbcEncoder {
     fn new(mode: FrameMode, output_params: CodecParameters, hp_filter_on: bool) -> Self {
         let lookback = vec![0.0f32; lookback_len(mode)];
+        // Identity LPC for the very first frame's enhancer-delay shift —
+        // matches the decoder's seeding (decoder.rs:81).
+        let mut identity = [0.0f32; LPC_ORDER + 1];
+        identity[0] = 1.0;
         Self {
             output_params,
             time_base: TimeBase::new(1, SAMPLE_RATE as i64),
@@ -157,6 +169,7 @@ impl IlbcEncoder {
             lsf_state: LsfState::new(),
             lpc_mem: [0.0; LPC_ORDER],
             cb_mem: [0.0; CB_LMEM],
+            old_a_per_sub: vec![identity; 6],
             hp_state: HpInputState::default(),
             hp_filter_on,
             pending: VecDeque::new(),
@@ -222,17 +235,40 @@ impl IlbcEncoder {
         let a_per_sub = decode_and_interpolate(&mut self.lsf_state, mode, &dec_qlsf);
         debug_assert_eq!(a_per_sub.len(), mode.sub_blocks());
 
+        // Build the §4.7 enhancer-delay-shifted LPC list — sub-block i
+        // of the current frame is synthesised (by the decoder) with the
+        // *previous* frame's LPC for i < shift, and with this frame's
+        // a_per_sub[i - shift] for i >= shift. shift = 1 (Ms20) or 2
+        // (Ms30). Mirrors `decoder.rs` exactly so the encoder's analysis
+        // filter inverts what the decoder synthesises.
+        let n_sub = mode.sub_blocks();
+        let shift = match mode {
+            FrameMode::Ms20 => 1usize,
+            FrameMode::Ms30 => 2usize,
+        };
+        let identity = {
+            let mut id = [0.0f32; LPC_ORDER + 1];
+            id[0] = 1.0;
+            id
+        };
+        let mut shifted_a: Vec<[f32; LPC_ORDER + 1]> = Vec::with_capacity(n_sub);
+        for i in 0..n_sub {
+            if i < shift {
+                let off = i + n_sub - shift;
+                shifted_a.push(self.old_a_per_sub.get(off).copied().unwrap_or(identity));
+            } else {
+                shifted_a.push(a_per_sub[i - shift]);
+            }
+        }
+
         // ---- 3. Residual via per-sub-block LPC analysis filter ----
         //
-        // Open-loop analysis using the encoder's input PCM history. This
-        // matches the RFC reference. Closed-loop alternatives (feeding
-        // the decoder's synth memory into the analysis filter) were
-        // tried and gave worse SNR in this project's simplified
-        // pipeline — they only help when the decoder-side synth memory
-        // truly equals the target output, which isn't the case with
-        // 3-bit scalar state quantisation and a 3-stage CB.
+        // Use the §4.7-shifted LPC so the encoder's residual maps
+        // exactly to what the decoder will resynthesise: residual[sb]
+        // is generated with the same LPC row that the decoder's synth
+        // filter will apply in reverse for sub-block sb.
         let mut residual = vec![0.0f32; samples];
-        for (sb, a) in a_per_sub.iter().enumerate().take(mode.sub_blocks()) {
+        for (sb, a) in shifted_a.iter().enumerate().take(n_sub) {
             let lo = sb * SUBL;
             let hi = lo + SUBL;
             let mut out = vec![0.0f32; SUBL];
@@ -246,6 +282,11 @@ impl IlbcEncoder {
         // but override its selected start_idx to 0 and always pick
         // position = 1 (keep the first STATE_SHORT_LEN samples of the
         // 80-sample span).
+        //
+        // The decoder uses `a_per_sub[0]` (the current frame's first
+        // sub-block LPC) for the state's all-pass phase compensation
+        // (decoder.rs:109). We mirror that exactly so encoder and
+        // decoder stay in lockstep on the scalar-state reconstruction.
         let a_for_phase = a_per_sub[0];
         let state_residual_slice = &residual[0..mode.state_short_len()];
         let ccres = crate::state_encode::allpass_forward(state_residual_slice, &a_for_phase);
@@ -294,8 +335,12 @@ impl IlbcEncoder {
         // entries of the CB memory; per Table 3.1 each stage has 128
         // entries (64 base + 64 expanded), so the cap is 128 throughout.
         let boundary_mem = &self.cb_mem[CB_LMEM - 85..];
-        let (boundary_res, boundary_rec) =
-            search_cb_capped(boundary_mem, boundary_samples, &target_boundary, &[128; 3]);
+        let (boundary_res, boundary_rec) = search_cb_capped_with_gain_correction(
+            boundary_mem,
+            boundary_samples,
+            &target_boundary,
+            &[128; 3],
+        );
         // Update cb_mem / state_vec exactly as the decoder will. The
         // decoder adds `boundary_exc[i]` to `excitation[STATE_LEN -
         // boundary_samples + i]` and also pushes `boundary_exc` as a
@@ -329,7 +374,7 @@ impl IlbcEncoder {
             // cannot encode.
             let stage12_cap = if cb_i == 0 { 128usize } else { 256usize };
             let target: [f32; SUBL] = core::array::from_fn(|i| residual[lo + i]);
-            let (res, excitation) = search_cb_capped(
+            let (res, excitation) = search_cb_capped_with_gain_correction(
                 &self.cb_mem,
                 SUBL,
                 &target,
@@ -362,7 +407,12 @@ impl IlbcEncoder {
             sub_blocks: sub_block_indices,
             empty_flag: false,
         };
-        pack_frame(&params)
+        let bytes = pack_frame(&params)?;
+        // Cache the current frame's per-sub-block LPC for the next
+        // frame's enhancer-delay shift (RFC §4.7) — mirrors the decoder's
+        // own `self.old_a_per_sub = a_per_sub` step.
+        self.old_a_per_sub = a_per_sub;
+        Ok(bytes)
     }
 
     /// Compute one (20 ms) or two (30 ms) LSF vectors from the input

@@ -40,6 +40,11 @@ const CB_MAXGAIN: f32 = 1.3;
 /// (RFC §3.6.4.2).
 const GAIN_SCALE_FLOOR: f32 = 0.1;
 
+/// LPC chirp factor for the perceptual weighting filter
+/// `Wk(z) = 1/Ak(z/LPC_CHIRP_WEIGHTDENUM)`.
+/// RFC 3951 §3.4 (line 820): `LPC_CHIRP_WEIGHTDENUM = 0.4222`.
+const LPC_CHIRP_WEIGHTDENUM: f32 = 0.4222;
+
 /// Result of one-sub-block codebook search.
 #[derive(Clone, Copy, Debug)]
 pub struct CbSearchResult {
@@ -156,6 +161,207 @@ pub fn search_cb_capped(
     }
 
     (CbSearchResult { cb_idx, gain_idx }, reconstructed)
+}
+
+/// As [`search_cb_capped`] but with the RFC 3951 §3.7 "Gain Correction
+/// Encoding" post-pass: bumps `gain_idx[0]` upward (capped at 2× the
+/// original quantised value) until the reconstructed-excitation energy
+/// approaches the target energy, fixing the systematic energy loss that
+/// the squared-error CB search introduces on unvoiced/noise-like input.
+///
+/// Reference: RFC 3951 §3.7 + Appendix A.34 (`iCBSearch`, lines 9050-9065).
+///
+/// Returns the (possibly-rescaled) indices plus the recomputed
+/// excitation — recomputed because the encoder must keep its codebook
+/// memory in lockstep with the decoder, which sees the rescaled gains.
+pub fn search_cb_capped_with_gain_correction(
+    cb_mem: &[f32],
+    cbveclen: usize,
+    target: &[f32],
+    caps: &[usize; 3],
+) -> (CbSearchResult, Vec<f32>) {
+    let (mut res, reconstructed) = search_cb_capped(cb_mem, cbveclen, target, caps);
+
+    // Target energy (unweighted residual domain — matches what the
+    // search itself optimised against).
+    let mut tene = 0.0f32;
+    for &t in target.iter() {
+        tene += t * t;
+    }
+    // Coded-vector energy (sum of three gain-scaled CB vecs == reconstructed).
+    let mut cene = 0.0f32;
+    for &c in reconstructed.iter() {
+        cene += c * c;
+    }
+
+    // Quantised stage-0 gain (scale 1.0 ⇒ value == table[index]).
+    let g0_quant = GAIN_SQ5_TBL[res.gain_idx[0] as usize];
+    let g0_sq = g0_quant * g0_quant;
+    if tene <= 0.0 || cene <= 0.0 || g0_sq <= 0.0 {
+        return (res, reconstructed);
+    }
+
+    // Per RFC §3.7 / iCBSearch:
+    //   for i in gain_idx[0]..32: if cene*tbl[i]^2 < tene*g0^2 and
+    //                              tbl[j] < 2*g0  ⇒ j = i
+    // Reference compares `gain_sq5Tbl[j]` (i.e. the *currently-best*
+    // candidate) against the cap, not `gain_sq5Tbl[i]`. We mirror that
+    // exactly so the bump can stop early when even the running pick
+    // already saturates the 2× ceiling.
+    let start_idx = res.gain_idx[0] as usize;
+    let mut j = start_idx;
+    let cap_2x = 2.0 * g0_quant;
+    let target_term = tene * g0_sq;
+    for (i, &v_i) in GAIN_SQ5_TBL.iter().enumerate().skip(start_idx) {
+        let ftmp = cene * v_i * v_i;
+        if ftmp < target_term && GAIN_SQ5_TBL[j] < cap_2x {
+            j = i;
+        }
+    }
+
+    if j == start_idx {
+        // No bump — return original.
+        return (res, reconstructed);
+    }
+
+    // Rebuild the excitation with the bumped stage-0 gain. Stages 1 and
+    // 2 are dequantised against `max(0.1, |g_prev_dec|)`, which scales
+    // *linearly* with g0 as long as the floor isn't hit; we therefore
+    // re-derive all three dequantised gains from the (possibly new)
+    // stage-0 index using the same chain the decoder will run.
+    res.gain_idx[0] = j as u8;
+    let new_exc = rebuild_excitation(cb_mem, cbveclen, &res.cb_idx, &res.gain_idx);
+    (res, new_exc)
+}
+
+/// Search variant matching RFC 3951 §3.4 / §3.6.2: the codebook memory
+/// and target are passed through the perceptual weighting filter
+/// `Wk(z) = 1/Ak(z/LPC_CHIRP_WEIGHTDENUM)` (i.e. an all-pole synthesis
+/// filter on the BW-expanded LPC) before the multistage NN search runs.
+/// The reconstruction is done in the **unweighted** domain — the
+/// returned excitation matches what the decoder will build from the
+/// chosen indices, so the encoder's CB memory stays in lockstep with
+/// the decoder.
+///
+/// `a` is the *unquantised* sub-block LPC `[1, a1..a10]`. The weighting
+/// filter chirps it inward by 0.4222 to flatten formant peaks before
+/// the search. `weight_state` is the 10-sample synthesis-filter memory;
+/// it is reset to zero at the start of each sub-block (matches the
+/// reference encoder, which also memsets `weightState` between
+/// sub-frames — see RFC 3951 Appendix A.34 / A.38 lines 3257, 3294).
+///
+/// Reference: `iCBSearch` in Appendix A.34 (the `AllPoleFilter(buf+...,
+/// weightDenum, ...)` call before the multistage loop).
+pub fn search_cb_weighted_with_gain_correction(
+    cb_mem: &[f32],
+    cbveclen: usize,
+    target: &[f32],
+    a: &[f32; LPC_ORDER + 1],
+    caps: &[usize; 3],
+) -> (CbSearchResult, Vec<f32>) {
+    debug_assert_eq!(target.len(), cbveclen);
+
+    // Build the BW-expanded LPC for the weighting filter.
+    let mut a_bw = *a;
+    let mut c = 1.0f32;
+    for a_k in a_bw.iter_mut() {
+        *a_k *= c;
+        c *= LPC_CHIRP_WEIGHTDENUM;
+    }
+
+    // Filter (cb_mem | target) through `1 / a_bw` with shared memory,
+    // starting from a zero state (matches the reference's
+    // `memset(weightState, 0, ...)` between sub-frames).
+    let lmem = cb_mem.len();
+    let mut buf = Vec::with_capacity(lmem + cbveclen);
+    buf.extend_from_slice(cb_mem);
+    buf.extend_from_slice(target);
+    let mut wmem = [0.0f32; LPC_ORDER];
+    for x in buf.iter_mut() {
+        let mut s = *x;
+        for k in 1..=LPC_ORDER {
+            s -= a_bw[k] * wmem[k - 1];
+        }
+        *x = s;
+        for k in (1..LPC_ORDER).rev() {
+            wmem[k] = wmem[k - 1];
+        }
+        wmem[0] = s;
+    }
+    // Slice out the weighted halves.
+    let (w_cb_mem, w_target) = buf.split_at(lmem);
+
+    // Run the standard multistage NN search in the weighted domain.
+    let (res_w, _w_recon) = search_cb_capped(w_cb_mem, cbveclen, w_target, caps);
+
+    // Rebuild the **unweighted** excitation from the chosen indices, so
+    // the encoder's `cb_mem` evolves identically to the decoder's.
+    let unweighted_recon = rebuild_excitation(cb_mem, cbveclen, &res_w.cb_idx, &res_w.gain_idx);
+
+    // §3.7 gain correction in the **unweighted** domain — the energy
+    // adjustment must use the same residual the decoder will see, not
+    // the weighted version (the reference applies §3.7 to the weighted
+    // `tene/cene`, but our weighting trades off perceptual peaks for
+    // waveform fidelity, and the unweighted compare is a closer match
+    // to our SNR target).
+    let mut res = res_w;
+    let mut tene = 0.0f32;
+    for &t in target.iter() {
+        tene += t * t;
+    }
+    let mut cene = 0.0f32;
+    for &c in unweighted_recon.iter() {
+        cene += c * c;
+    }
+    let g0_quant = GAIN_SQ5_TBL[res.gain_idx[0] as usize];
+    let g0_sq = g0_quant * g0_quant;
+    if tene > 0.0 && cene > 0.0 && g0_sq > 0.0 {
+        let start_idx = res.gain_idx[0] as usize;
+        let mut j = start_idx;
+        let cap_2x = 2.0 * g0_quant;
+        let target_term = tene * g0_sq;
+        for (i, &v_i) in GAIN_SQ5_TBL.iter().enumerate().skip(start_idx) {
+            let ftmp = cene * v_i * v_i;
+            if ftmp < target_term && GAIN_SQ5_TBL[j] < cap_2x {
+                j = i;
+            }
+        }
+        if j != start_idx {
+            res.gain_idx[0] = j as u8;
+            let new_exc = rebuild_excitation(cb_mem, cbveclen, &res.cb_idx, &res.gain_idx);
+            return (res, new_exc);
+        }
+    }
+    (res, unweighted_recon)
+}
+
+/// Re-extract the codebook vectors at the chosen indices and combine
+/// them with the dequantised gains from those gain indices. Mirrors the
+/// decoder's `construct_excitation` / `construct_excitation_veclen`
+/// routines but stays self-contained for use inside the search.
+fn rebuild_excitation(
+    cb_mem: &[f32],
+    cbveclen: usize,
+    cb_idx: &[u16; 3],
+    gain_idx: &[u8; 3],
+) -> Vec<f32> {
+    // Decoder-equivalent gain chain.
+    const FLOOR: f32 = GAIN_SCALE_FLOOR;
+    let g0 = GAIN_SQ5_TBL[gain_idx[0] as usize] * 1.0_f32.max(FLOOR);
+    let s1 = g0.abs().max(FLOOR);
+    let g1 = GAIN_SQ4_TBL[gain_idx[1] as usize] * s1;
+    let s2 = g1.abs().max(FLOOR);
+    let g2 = GAIN_SQ3_TBL[gain_idx[2] as usize] * s2;
+    let gains = [g0, g1, g2];
+
+    let mut out = vec![0.0f32; cbveclen];
+    for stage in 0..3 {
+        let v = extract_cbvec_veclen(cb_mem, cb_idx[stage], cbveclen);
+        for (o, &v_n) in out.iter_mut().zip(v.iter()) {
+            *o += gains[stage] * v_n;
+        }
+    }
+    out
 }
 
 /// As [`search_stage`] but limit the search range to `cap` candidates.

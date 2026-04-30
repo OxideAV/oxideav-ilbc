@@ -4,9 +4,11 @@
 //! the iLBC encoder and runs the output packets back through the
 //! decoder. Reports SNR in dB for both 20 ms and 30 ms modes.
 //!
-//! The task target is SNR > 8 dB on voiced material; this test asserts
-//! at least 5 dB (initial encoder is conservative) while printing the
-//! actual figure for tuning.
+//! Round 20 floor (after §3.7 "Gain Correction Encoding"):
+//!   - sine    20 ms ≥ 24 dB
+//!   - sine    30 ms ≥ 26 dB
+//!   - voiced  20 ms ≥ 22 dB
+//!   - voiced  30 ms ≥ 24.5 dB
 
 use oxideav_core::{
     AudioFrame, CodecId, CodecOptions, CodecParameters, Frame, Packet, SampleFormat, TimeBase,
@@ -150,7 +152,10 @@ fn round_trip_sine_20ms() {
         "round_trip_20ms_sine: SNR = {:.2} dB (aligned = {:.2} dB)",
         snr, snr_aligned
     );
-    assert!(snr > 20.0, "20 ms sine SNR below 20 dB target: {}", snr);
+    // Round 20 floor: §3.7 gain-correction post-pass keeps the
+    // already-strong sine numbers stable; lock in 24 dB so future
+    // regressions are caught.
+    assert!(snr > 24.0, "20 ms sine SNR below 24 dB target: {}", snr);
 }
 
 /// Per-frame best-lag SNR average, skipping warm-up frames. This is
@@ -199,10 +204,10 @@ fn round_trip_voiced_20ms() {
         "round_trip_20ms_voiced: per-frame best-lag avg SNR = {:.2} dB",
         avg
     );
-    // Round 19 floor: residual-domain CB search + bit-width caps + RFC §4.7
-    // synth-shift puts us comfortably above the speech-codec range. Lock in
-    // 18 dB so future regressions are caught immediately.
-    assert!(avg > 18.0, "20 ms voiced SNR below 18 dB target: {}", avg);
+    // Round 20 floor: RFC §3.7 gain-correction post-pass on top of the
+    // r19 residual-domain CB search. Voiced 20 ms moved 22.14 → 22.26
+    // dB; lock in 22 dB so future regressions are caught immediately.
+    assert!(avg > 22.0, "20 ms voiced SNR below 22 dB target: {}", avg);
 }
 
 #[test]
@@ -217,8 +222,9 @@ fn round_trip_voiced_30ms() {
         "round_trip_30ms_voiced: per-frame best-lag avg SNR = {:.2} dB",
         avg
     );
-    // Round 19 floor — see comment in `round_trip_voiced_20ms`.
-    assert!(avg > 20.0, "30 ms voiced SNR below 20 dB target: {}", avg);
+    // Round 20 floor: §3.7 gain correction lifts 30 ms voiced from
+    // 24.53 → 24.73 dB. Lock in 24.5 dB.
+    assert!(avg > 24.5, "30 ms voiced SNR below 24.5 dB target: {}", avg);
 }
 
 #[test]
@@ -230,5 +236,7 @@ fn round_trip_sine_30ms() {
     let aligned = &decoded[skip..skip + (pcm.len() - skip)];
     let snr = best_snr_db(&pcm[skip..], aligned, 240);
     println!("round_trip_30ms_sine: best-lag SNR = {:.2} dB", snr);
-    assert!(snr > 22.0, "30 ms sine SNR below 22 dB target: {}", snr);
+    // Round 20 floor: 30 ms sine sits comfortably above 26 dB; lock in
+    // 26.0 to catch any regression from the §3.7 pipeline.
+    assert!(snr > 26.0, "30 ms sine SNR below 26 dB target: {}", snr);
 }

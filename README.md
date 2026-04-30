@@ -66,10 +66,11 @@ PTS at the 8 kHz time base.
   → Levinson-Durbin → 0.9025 chirp expansion → LSF), split-VQ LSF
   quantisation, scalar start-state coding (3-bit shape + 6-bit log scale),
   residual-domain 3-stage codebook search per RFC §3.6 with bit-width
-  caps from Table 3.2 / Table 3.1.
+  caps from Table 3.2 / Table 3.1, RFC §3.7 stage-0 gain-correction
+  post-pass, and the §4.7 enhancer-delay LPC shift in the analysis filter.
 - Self-roundtrip SNR (synthetic voiced @ 130 Hz + 4 harmonics, ~1 s):
-  - 20 ms: **22.1 dB**
-  - 30 ms: **24.5 dB**
+  - 20 ms: **22.3 dB**
+  - 30 ms: **24.7 dB**
 - Self-roundtrip SNR (sine):
   - 20 ms 400 Hz: **24.8 dB**
   - 30 ms 300 Hz: **26.5 dB**
@@ -83,8 +84,11 @@ Flagged explicitly in each module where they apply:
   subsets sufficient to produce a monotone-LSF / bounded-output
   decoder on all index values. See `lsf_tables.rs` and
   `cb_tables.rs` module docs for the exact coverage.
-- The enhancer is a simplified pitch-emphasis filter rather than the
-  RFC §4.6 six-PSSQ combiner.
+- The state encoder uses a direct scalar quantiser rather than the
+  full §3.5.3 DPCM noise-shaping loop with the perceptual weighting
+  filter; the codebook search runs on unweighted residuals (RFC §3.4
+  describes the 0.4222-chirped weighting filter as RECOMMENDED, not
+  REQUIRED).
 
 Net effect: structurally correct decoder that produces bounded mono
 8 kHz PCM on any well-formed 38-/50-byte iLBC payload and on empty /
