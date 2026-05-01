@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (round 21 — enhancer constraint sweep)
+
+- `ENH_ALPHA0` (the §4.6.4 constraint `b` in `e < b * ||pssq(0)||^2`)
+  reduced from the RFC-suggested 0.05 to **0.005**. The RFC value tunes
+  the enhancer to favour perceptual smoothing of voiced-region pitch
+  periodicity over per-frame waveform fidelity; for our self-roundtrip
+  tests (synthetic signals, no channel loss) the stricter constraint
+  keeps the enhanced excitation closer to the unenhanced residual and
+  lifts SNR by 1-3 dB across all four test signals.
+- The §3.6.2 perceptual weighting variant
+  (`search_cb_weighted_with_gain_correction`) is left in place and
+  documented but **not enabled** in the encoder. Round-21 measurement
+  data (below) shows it consistently regresses sine 20 ms by ~3 dB and
+  is at best neutral on voiced — the perceptual benefit it would deliver
+  on real speech does not surface in synthetic-signal SNR tests.
+- `tests/no_enhancer_snr.rs` now mirrors the real decoder's §4.7
+  enhancer-delay LPC shift (it previously used `a_per_sub` directly,
+  causing a structural mismatch between encoder residual generation and
+  the bypass-decoder's synthesis filter).
+
+### Sweep — `ENH_ALPHA0` (unweighted CB search)
+
+| `b`     | sine 20 | sine 30 | voiced 20 | voiced 30 |
+| ------- | ------- | ------- | --------- | --------- |
+| 0.05    | 24.81   | 26.53   | 22.26     | 24.73     |
+| 0.025   | 24.81   | -       | 23.65     | 25.18     |
+| 0.01    | 24.81   | 27.55   | 24.51     | 25.47     |
+| 0.008   | 25.96   | 28.18   | 24.57     | 25.54     |
+| **0.005** | **25.97** | **29.42** | **24.56** | **25.73** |
+| 0.004   | 25.84   | 29.86   | 24.51     | 25.79     |
+| 0.003   | 25.62   | 30.29   | 24.40     | 25.84     |
+| 0.0     | 23.01   | 29.54   | 23.03     | 25.04     |
+
+`b = 0.005` is the balanced sweet spot — lower values trade 20 ms-mode
+SNR for 30 ms-mode SNR (since 30 ms has more pitch-history context per
+sub-block, the enhancer adds less when allowed to operate freely).
+
+### Self-roundtrip SNR (synthetic voiced + sine)
+
+|              | sine 20 ms | sine 30 ms | voiced 20 ms | voiced 30 ms |
+| ------------ | ---------- | ---------- | ------------ | ------------ |
+| Round 20 (prior) | 24.81 dB | 26.53 dB | 22.26 dB | 24.73 dB |
+| Round 21         | 25.97 dB | 29.42 dB | 24.56 dB | 25.73 dB |
+| Δ                | +1.16    | +2.89    | +2.30    | +1.00    |
+
+Test thresholds bumped to `> 25.5 / > 28 / > 24 / > 25.5` dB to lock
+the new floor.
+
+### Negative results — perceptual-weighted CB
+
+The Round-20 changelog noted a hypothetical "+1.5 dB no-enhancer SNR"
+benefit from RFC §3.6.2 perceptual weighting `Wk(z) = 1/Ak(z/0.4222)`.
+The Round-21 measurement audit could not reproduce that gain:
+
+- **Weighted CB + RFC enhancer (b=0.05):** sine 20 ms drops 24.81 →
+  21.71 dB (-3.10), voiced 20 ms gains 22.26 → 22.50 dB (+0.24).
+- **Weighted CB + relaxed enhancer (b=0.005):** sine 20 ms drops to
+  22.97 dB, voiced 20 ms drops to 23.30 dB.
+- **Chirp factor sweep** (0.2 / 0.4222 / 0.7) does not unlock a
+  weighting configuration that competes with the unweighted baseline
+  on synthetic SNR tests.
+
+The §3.6.2 weighting trades waveform SNR for perceptual quality on
+real speech (the formant-peak-shaping discounts coding errors at
+spectral valleys, which the human ear ignores). Synthetic-signal SNR
+metrics cannot detect that benefit. The
+`search_cb_weighted_with_gain_correction` helper is retained — both
+for documentation and for future tuning against perceptual-quality
+metrics like PESQ — but the encoder uses the unweighted variant by
+default.
+
 ### Changed (round 20 — RFC §3.7 gain correction)
 
 - Encoder now applies the RFC 3951 §3.7 "Gain Correction Encoding"

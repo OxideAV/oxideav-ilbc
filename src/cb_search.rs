@@ -292,25 +292,19 @@ pub fn search_cb_weighted_with_gain_correction(
     let (w_cb_mem, w_target) = buf.split_at(lmem);
 
     // Run the standard multistage NN search in the weighted domain.
-    let (res_w, _w_recon) = search_cb_capped(w_cb_mem, cbveclen, w_target, caps);
+    let (res_w, w_recon) = search_cb_capped(w_cb_mem, cbveclen, w_target, caps);
 
-    // Rebuild the **unweighted** excitation from the chosen indices, so
-    // the encoder's `cb_mem` evolves identically to the decoder's.
-    let unweighted_recon = rebuild_excitation(cb_mem, cbveclen, &res_w.cb_idx, &res_w.gain_idx);
-
-    // §3.7 gain correction in the **unweighted** domain — the energy
-    // adjustment must use the same residual the decoder will see, not
-    // the weighted version (the reference applies §3.7 to the weighted
-    // `tene/cene`, but our weighting trades off perceptual peaks for
-    // waveform fidelity, and the unweighted compare is a closer match
-    // to our SNR target).
+    // §3.7 gain correction in the **weighted** domain — matches the
+    // reference `iCBSearch` which computes `tene` and `cene` from the
+    // weighted target and weighted reconstruction (see RFC 3951
+    // Appendix A.34, lines 8622-8633 and 9050-9065).
     let mut res = res_w;
     let mut tene = 0.0f32;
-    for &t in target.iter() {
+    for &t in w_target.iter() {
         tene += t * t;
     }
     let mut cene = 0.0f32;
-    for &c in unweighted_recon.iter() {
+    for &c in w_recon.iter() {
         cene += c * c;
     }
     let g0_quant = GAIN_SQ5_TBL[res.gain_idx[0] as usize];
@@ -328,10 +322,13 @@ pub fn search_cb_weighted_with_gain_correction(
         }
         if j != start_idx {
             res.gain_idx[0] = j as u8;
-            let new_exc = rebuild_excitation(cb_mem, cbveclen, &res.cb_idx, &res.gain_idx);
-            return (res, new_exc);
         }
     }
+
+    // Rebuild the **unweighted** excitation from the (possibly-bumped)
+    // indices, so the encoder's `cb_mem` evolves identically to the
+    // decoder's.
+    let unweighted_recon = rebuild_excitation(cb_mem, cbveclen, &res.cb_idx, &res.gain_idx);
     (res, unweighted_recon)
 }
 

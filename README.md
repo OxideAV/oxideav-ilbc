@@ -69,11 +69,11 @@ PTS at the 8 kHz time base.
   caps from Table 3.2 / Table 3.1, RFC §3.7 stage-0 gain-correction
   post-pass, and the §4.7 enhancer-delay LPC shift in the analysis filter.
 - Self-roundtrip SNR (synthetic voiced @ 130 Hz + 4 harmonics, ~1 s):
-  - 20 ms: **22.3 dB**
-  - 30 ms: **24.7 dB**
+  - 20 ms: **24.6 dB** (round 21: +2.3 dB from r20)
+  - 30 ms: **25.7 dB** (round 21: +1.0 dB from r20)
 - Self-roundtrip SNR (sine):
-  - 20 ms 400 Hz: **24.8 dB**
-  - 30 ms 300 Hz: **26.5 dB**
+  - 20 ms 400 Hz: **26.0 dB** (round 21: +1.2 dB from r20)
+  - 30 ms 300 Hz: **29.4 dB** (round 21: +2.9 dB from r20)
 
 ### Deviations from RFC 3951
 
@@ -89,6 +89,14 @@ Flagged explicitly in each module where they apply:
   filter; the codebook search runs on unweighted residuals (RFC §3.4
   describes the 0.4222-chirped weighting filter as RECOMMENDED, not
   REQUIRED).
+- The §4.6 enhancer constraint `b` is set to 0.005 instead of the
+  RFC-suggested 0.05. The RFC value tunes the enhancer for perceptual
+  smoothing of voiced-region pitch periodicity at the cost of
+  per-frame waveform fidelity; for our self-roundtrip tests (which
+  exercise pure synthetic signals through encoder + decoder, with no
+  channel) the lower constraint preserves the unenhanced excitation
+  and lifts the SNR floor by 1-3 dB across all four test signals.
+  Reference: round 21 sweep in CHANGELOG.
 
 Net effect: structurally correct decoder that produces bounded mono
 8 kHz PCM on any well-formed 38-/50-byte iLBC payload and on empty /

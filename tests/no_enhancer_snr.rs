@@ -22,14 +22,21 @@ struct BypassDecoder {
     lsf_state: LsfState,
     synth: SynthState,
     cb_mem: [f32; CB_LMEM],
+    /// Previous-frame per-sub-block LPC, used by the §4.7 enhancer-delay
+    /// shift in synthesis. Must mirror what the real decoder does so the
+    /// no-enhancer baseline is meaningful.
+    old_a_per_sub: Vec<[f32; LPC_ORDER + 1]>,
 }
 
 impl BypassDecoder {
     fn new() -> Self {
+        let mut id = [0.0f32; LPC_ORDER + 1];
+        id[0] = 1.0;
         Self {
             lsf_state: LsfState::new(),
             synth: SynthState::new(),
             cb_mem: [0.0; CB_LMEM],
+            old_a_per_sub: vec![id; 6],
         }
     }
 
@@ -83,9 +90,33 @@ impl BypassDecoder {
             }
             update_cb_memory(&mut self.cb_mem, &e);
         }
-        // BYPASS THE ENHANCER — feed `excitation` directly to synthesis.
+        // §4.7 enhancer-delay LPC shift — must mirror the real decoder
+        // so the encoder/decoder synth filter stays aligned.
+        let shift = match fp.mode {
+            FrameMode::Ms20 => 1usize,
+            FrameMode::Ms30 => 2usize,
+        };
+        let mut shifted_a = Vec::with_capacity(n_sub);
+        for i in 0..n_sub {
+            if i < shift {
+                let off = i + n_sub - shift;
+                let row = self.old_a_per_sub.get(off).copied().unwrap_or_else(|| {
+                    let mut id = [0.0f32; LPC_ORDER + 1];
+                    id[0] = 1.0;
+                    id
+                });
+                shifted_a.push(row);
+            } else {
+                shifted_a.push(a_per_sub[i - shift]);
+            }
+        }
+
+        // BYPASS THE ENHANCER — feed `excitation` directly to synthesis,
+        // but use the shifted LPC so the test mirrors the real decoder
+        // pipeline (minus the enhancer step).
         let mut out = vec![0.0f32; n_sub * SUBL];
-        synthesise_frame(&excitation, &a_per_sub, &mut self.synth, &mut out);
+        synthesise_frame(&excitation, &shifted_a, &mut self.synth, &mut out);
+        self.old_a_per_sub = a_per_sub;
         out.iter()
             .map(|&v| v.round().clamp(-32768.0, 32767.0) as i16)
             .collect()
