@@ -32,9 +32,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use oxideav_core::{CodecId, CodecParameters, Decoder, Frame, Packet, SampleFormat, TimeBase};
-use oxideav_ilbc::{
-    FrameMode, CODEC_ID_STR, FRAME_BYTES_20MS, FRAME_BYTES_30MS, SAMPLE_RATE,
-};
+use oxideav_ilbc::{FrameMode, CODEC_ID_STR, FRAME_BYTES_20MS, FRAME_BYTES_30MS, SAMPLE_RATE};
 
 /// Locate `docs/audio/ilbc/fixtures/<name>/`. Tests run with CWD set
 /// to the crate root, so we walk two levels up to reach the workspace
@@ -112,7 +110,8 @@ fn split_frames(input: &[u8], carriage: Carriage) -> (FrameMode, Vec<Vec<u8>>) {
                 let len = u16::from_be_bytes([input[off], input[off + 1]]) as usize;
                 off += 2;
                 assert_eq!(
-                    len, frame_size,
+                    len,
+                    frame_size,
                     "rtp-style frame at off={} carries len={} (expected {})",
                     off - 2,
                     len,
@@ -226,13 +225,13 @@ fn decode_pcm(packets: &[Vec<u8>]) -> Result<Vec<i16>, String> {
     params.sample_rate = Some(SAMPLE_RATE);
     params.channels = Some(1);
     params.sample_format = Some(SampleFormat::S16);
-    let mut dec = oxideav_ilbc::decoder::make_decoder(&params)
-        .map_err(|e| format!("make_decoder: {e:?}"))?;
+    let mut dec =
+        oxideav_ilbc::decoder::make_decoder(&params).map_err(|e| format!("make_decoder: {e:?}"))?;
 
     let mut pcm: Vec<i16> = Vec::with_capacity(packets.len() * 240);
     for (i, frame) in packets.iter().enumerate() {
-        let pkt = Packet::new(0, TimeBase::new(1, SAMPLE_RATE as i64), frame.clone())
-            .with_pts(i as i64);
+        let pkt =
+            Packet::new(0, TimeBase::new(1, SAMPLE_RATE as i64), frame.clone()).with_pts(i as i64);
         if let Err(e) = dec.send_packet(&pkt) {
             return Err(format!("packet {i}: send_packet: {e:?}"));
         }
