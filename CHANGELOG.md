@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/OxideAV/oxideav-ilbc/compare/v0.0.2...v0.0.3) - 2026-05-03
+
+### Other
+
+- drop unused Decoder import in tests/docs_corpus.rs
+- cargo fmt rustfmt 1.95 line-wrap diffs
+- wire docs/audio/ilbc/fixtures corpus as integration test
+- replace never-match regex with semver_check = false
+- migrate to centralized OxideAV/.github reusable workflows
+- enhancer constraint sweep — voiced 20 ms past 24 dB
+- RFC 3951 §3.7 gain correction + §4.7 encoder-side LPC shift
+- r19 encoder/decoder fidelity overhaul — voiced SNR 9 → 22 dB
+- adopt slim VideoFrame/AudioFrame shape
+- ilbc encoder: optional HP pre-processing filter (RFC 3951 §3.1)
+- pin release-plz to patch-only bumps
+
 ### Changed (round 21 — enhancer constraint sweep)
 
 - `ENH_ALPHA0` (the §4.6.4 constraint `b` in `e < b * ||pssq(0)||^2`)
