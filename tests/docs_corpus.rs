@@ -31,7 +31,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use oxideav_core::{CodecId, CodecParameters, Decoder, Frame, Packet, SampleFormat, TimeBase};
+use oxideav_core::{CodecId, CodecParameters, Frame, Packet, SampleFormat, TimeBase};
 use oxideav_ilbc::{FrameMode, CODEC_ID_STR, FRAME_BYTES_20MS, FRAME_BYTES_30MS, SAMPLE_RATE};
 
 /// Locate `docs/audio/ilbc/fixtures/<name>/`. Tests run with CWD set
