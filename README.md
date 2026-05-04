@@ -64,10 +64,17 @@ PTS at the 8 kHz time base.
   Lagrange-constraint optimisation from §4.6.4 / §4.6.5).
 - Encoder: LPC analysis (asymmetric / Hanning windowing → autocorrelation
   → Levinson-Durbin → 0.9025 chirp expansion → LSF), split-VQ LSF
-  quantisation, scalar start-state coding (3-bit shape + 6-bit log scale),
-  residual-domain 3-stage codebook search per RFC §3.6 with bit-width
-  caps from Table 3.2 / Table 3.1, RFC §3.7 stage-0 gain-correction
-  post-pass, and the §4.7 enhancer-delay LPC shift in the analysis filter.
+  quantisation, scalar start-state coding (3-bit shape + 6-bit log scale)
+  with RFC §3.5.1 `position`-bit selection (boundary CB block placed in
+  the lower-energy slot of the 80-sample state span when the energy
+  ratio justifies the IIR error-propagation cost), residual-domain
+  3-stage codebook search per RFC §3.6 with bit-width caps from
+  Table 3.2 / Table 3.1, RFC §3.7 stage-0 gain-correction post-pass,
+  and the §4.7 enhancer-delay LPC shift in the analysis filter.
+- Decoder: position-bit-aware boundary CB placement so the 80-sample
+  state vector reflects whichever layout the encoder picked
+  (`scalar | boundary` for position=1, `boundary | scalar` for
+  position=0). RFC §3.5 / §4.2 closed.
 - Self-roundtrip SNR (synthetic voiced @ 130 Hz + 4 harmonics, ~1 s):
   - 20 ms: **24.6 dB** (round 21: +2.3 dB from r20)
   - 30 ms: **25.7 dB** (round 21: +1.0 dB from r20)
@@ -97,11 +104,43 @@ Flagged explicitly in each module where they apply:
   channel) the lower constraint preserves the unenhanced excitation
   and lifts the SNR floor by 1-3 dB across all four test signals.
   Reference: round 21 sweep in CHANGELOG.
+- The §3.5.1 `block_class` field (variable start-state location across
+  sub-blocks) is pinned to `start_idx = 0` (block_class = 1, state at
+  sub-blocks 0 and 1). Implementing variable start_idx requires
+  rewriting the CB sub-block emission order on both encoder and
+  decoder (forward + backward passes around the state span); the
+  current fixed layout still produces a complete bit-exact-pack /
+  bit-exact-unpack pipeline against the Table 3.2 wire format. The
+  `position` bit IS variable (round 22).
 
 Net effect: structurally correct decoder that produces bounded mono
 8 kHz PCM on any well-formed 38-/50-byte iLBC payload and on empty /
 lost frames, but output is not guaranteed to be bit-exact against the
-RFC 3951 reference decoder.
+RFC 3951 reference decoder. We have no real-codec interop oracle in
+the test suite — the workspace policy bars consulting external iLBC
+implementations (libilbc / WebRTC iLBC / freeswitch) so cross-decoder
+validation against a third-party reference would require a black-box
+binary fixture pipeline that we have not stood up.
+
+### Encoder fidelity surface (RFC 3951)
+
+| Subsystem | Status |
+| --- | --- |
+| §3.1 HP biquad pre-processing | opt-in (`hp_filter=on`); RFC describes as conditional |
+| §3.2 LPC analysis (asymmetric / Hanning + Levinson-Durbin + 0.9025 chirp + LSF) | full |
+| §3.2.4 split-VQ LSF quantiser (lsfCbTbl_{1,2,3}) | full |
+| §3.2.5-7 stabilise + per-sub-block LSF interpolation | full (matches decoder) |
+| §3.3 LPC analysis filter (with §4.7 enhancer-delay shift) | full |
+| §3.5 scalar start-state coding (3-bit shape + 6-bit log scale) | full |
+| §3.5.1 `block_class` (variable start_idx) | pinned at start_idx=0 — see deviations |
+| §3.5.1 `position` bit | full (energy-threshold heuristic) |
+| §3.5.3 perceptual-DPCM noise-shaping loop | direct scalar quantiser substitute |
+| §3.6 multistage CB search (boundary 22/23 + 40-sample sub-blocks) | full with Table 3.1/3.2 caps |
+| §3.6.2 perceptual weighting (`Wk(z)=1/Ak(z/0.4222)`) | implemented but disabled (round-21 sweep — regresses synthetic SNR) |
+| §3.7 stage-0 gain-correction post-pass | full |
+| §3.8 packet layout (Table 3.2 flat) + empty-frame indicator | full read+write |
+| §4.6 enhancer constraint (`b`) | tuned from RFC's 0.05 to 0.005 (round-21 SNR sweep) |
+| §4.7 enhancer-delay LPC shift in analysis filter | full |
 
 ## Codec id
 

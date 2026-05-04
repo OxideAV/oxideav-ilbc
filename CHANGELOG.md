@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (round 22 — RFC §3.5.1 `position`-bit selection)
+
+- Encoder now picks the `position` bit per RFC §3.5.1: the boundary CB
+  block (22 / 23 samples) is placed in whichever slot of the 80-sample
+  state span has the lower residual energy, leaving the higher-energy
+  slot for scalar coding (3 bits/sample, much more accurate than the
+  21-bit boundary CB). The encoder uses an energy-ratio threshold of
+  4× before flipping to `position = 0` — synthetic-signal sweeps show
+  that the all-pole synthesis filter amplifies leading-slot CB
+  quantisation errors throughout the rest of the frame, so dropping
+  the leading slot into the boundary CB is only a net win when the
+  trailing residual genuinely dominates (voiced/transient onsets).
+- Decoder is now position-aware: the 80-sample state vector is built
+  with the scalar samples at `[0..n_short]` and boundary CB at
+  `[n_short..STATE_LEN]` for `position = 1`, or the reverse layout
+  (boundary leading, scalar trailing) for `position = 0`. Together
+  with the encoder change this closes the RFC §3.5 / §4.2 gap; both
+  flow paths are exercised by the new `tests/position_bit.rs`.
+- Synthetic-signal SNR floors are unchanged (steady sine / voiced
+  signals do not trip the 4× ratio gate, so they continue to use the
+  position = 1 layout that round 21 measured at 25.97 / 29.42 / 24.56
+  / 25.73 dB). The new path is exercised by an onset-shaped fixture
+  and produces bounded PCM with < 4 saturated samples per 160-sample
+  frame.
+
+### Encoder coverage delta
+
+The remaining structural gap is the §3.5.1 `block_class` field
+(variable start_idx — letting the state span slide to sub-blocks
+other than 0/1). Closing it requires rewriting the CB sub-block
+emission order in BOTH encoder and decoder to handle the
+forward + backward CB walks around the state span. Until that lands,
+the encoder advertises 100 % spec-shape compliance with a documented
+caveat that block_class is pinned at 1 and that we have no real-codec
+interop oracle in CI (the workspace policy bars consulting external
+iLBC implementations).
+
 ## [0.0.3](https://github.com/OxideAV/oxideav-ilbc/compare/v0.0.2...v0.0.3) - 2026-05-03
 
 ### Other

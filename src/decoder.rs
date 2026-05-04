@@ -113,14 +113,45 @@ impl IlbcDecoder {
         // Seed the adaptive-codebook memory with the scalar state,
         // padded to STATE_LEN samples. The 23-/22-sample boundary
         // block will be decoded as the first CB sub-block below.
+        //
+        // The `position` bit (RFC 3951 §3.5 / §4.2) selects whether the
+        // boundary CB output precedes (0) or follows (1) the scalar
+        // start-state samples within the 80-sample state vector:
+        //   - position = 1: state_vec = [ scalar(n_short) | boundary(boundary_samples) ]
+        //   - position = 0: state_vec = [ boundary(boundary_samples) | scalar(n_short) ]
+        //
+        // The encoder picks whichever layout drops the boundary into the
+        // lower-energy half of the residual, leaving the higher-energy
+        // half to scalar coding (which has more bits per sample than the
+        // 22/23-sample CB).
+        let n_short = fp.mode.state_short_len();
+        let boundary_samples = match fp.mode {
+            FrameMode::Ms20 => 23,
+            FrameMode::Ms30 => 22,
+        };
+        debug_assert_eq!(scalar_state.len(), n_short);
+        let scalar_offset = if fp.position == 1 {
+            0
+        } else {
+            boundary_samples
+        };
+        let boundary_offset = if fp.position == 1 { n_short } else { 0 };
         let mut state_vec = [0.0f32; STATE_LEN];
-        let copy_len = scalar_state.len().min(STATE_LEN);
-        state_vec[..copy_len].copy_from_slice(&scalar_state[..copy_len]);
-        // The position bit selects whether the 23-/22-sample CB output
-        // precedes (0) or follows (1) the scalar state within the
-        // 80-sample state vector. For a first-cut decoder we always
-        // place the scalar samples at the end of CB memory and let the
-        // first CB sub-block fill in the rest.
+        // Place scalar state in its position-selected slot. boundary
+        // samples are zero in `state_vec` until the boundary CB decode
+        // below fills them in.
+        for (k, &s) in scalar_state.iter().enumerate() {
+            let dst = scalar_offset + k;
+            if dst < STATE_LEN {
+                state_vec[dst] = s;
+            }
+        }
+        // Seed cb_mem with the partially-filled state_vec (boundary slot
+        // still zero). RFC §3.6.1 boundary search reads back lMem=85
+        // samples, of which the last `STATE_LEN` are state_vec. The
+        // lookback for the boundary block legitimately includes the
+        // scalar samples that already sit in the state_vec slot, while
+        // the boundary slot itself reads as zero.
         for i in 0..CB_LMEM {
             self.cb_mem[i] = if i >= CB_LMEM - STATE_LEN {
                 state_vec[i - (CB_LMEM - STATE_LEN)]
@@ -142,8 +173,7 @@ impl IlbcDecoder {
         // Sub-blocks 0/1: the 80-sample state vector directly drives
         // the first two synthesis sub-blocks. The 22-/23-sample
         // boundary CB block is used both as the CB-memory seed and to
-        // fill any residual bump in the state — we fold its energy
-        // into the second half of the state vector.
+        // fill the boundary slot of the state vector.
         //
         // RFC 3951 §3.6.1: the boundary block uses lMem = 85 (not 147),
         // i.e. the search/extract operates on the last 85 entries of the
@@ -151,10 +181,7 @@ impl IlbcDecoder {
         let boundary_mem = &self.cb_mem[CB_LMEM - 85..];
         let boundary_full = construct_excitation_veclen(
             boundary_mem,
-            match fp.mode {
-                FrameMode::Ms20 => 23,
-                FrameMode::Ms30 => 22,
-            },
+            boundary_samples,
             &fp.boundary.cb_idx,
             &fp.boundary.gain_idx,
         );
@@ -168,23 +195,16 @@ impl IlbcDecoder {
             arr[..copy].copy_from_slice(&boundary_full[..copy]);
             arr
         };
-        // Copy the state vector into the first two sub-blocks of
-        // excitation. The `position` bit selects whether the boundary
-        // CB samples prepend or append the scalar state; we treat them
-        // as appending for a first-cut decoder.
+        // Copy the (already partially populated) state vector into the
+        // first two sub-blocks of excitation, then drop the boundary
+        // CB samples into their position-selected slot.
         excitation[0..STATE_LEN].copy_from_slice(&state_vec[..STATE_LEN]);
-        // Fold the boundary CB vector into the tail of the state span
-        // so its contribution reaches the synthesis filter.
-        let boundary_samples = match fp.mode {
-            FrameMode::Ms20 => 23,
-            FrameMode::Ms30 => 22,
-        };
         for (i, &sample) in boundary_exc
             .iter()
             .take(boundary_samples.min(SUBL))
             .enumerate()
         {
-            let dst = STATE_LEN - boundary_samples + i;
+            let dst = boundary_offset + i;
             if dst < excitation.len() {
                 excitation[dst] += sample;
             }

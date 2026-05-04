@@ -276,19 +276,66 @@ impl IlbcEncoder {
             residual[lo..hi].copy_from_slice(&out);
         }
 
-        // ---- 4. Start-state encoding. We pin the state to sub-blocks
-        //         0 and 1 to match the decoder's wiring.
-        // We still call `encode_state` for the scale + shape quantisation,
-        // but override its selected start_idx to 0 and always pick
-        // position = 1 (keep the first STATE_SHORT_LEN samples of the
-        // 80-sample span).
+        // ---- 4. Start-state encoding. We pin the state span to
+        //         sub-blocks 0 and 1 (block_class = 1) but pick the
+        //         `position` bit per RFC §3.5.1 so the lower-energy
+        //         half of the state span is the one that gets boundary-
+        //         CB-coded (22/23 samples / 21 bits) instead of the
+        //         scalar-coded one (57/58 × 3 bits + 6-bit scale).
         //
         // The decoder uses `a_per_sub[0]` (the current frame's first
         // sub-block LPC) for the state's all-pass phase compensation
         // (decoder.rs:109). We mirror that exactly so encoder and
         // decoder stay in lockstep on the scalar-state reconstruction.
         let a_for_phase = a_per_sub[0];
-        let state_residual_slice = &residual[0..mode.state_short_len()];
+        let n_short = mode.state_short_len();
+        let boundary_samples = match mode {
+            FrameMode::Ms20 => 23usize,
+            FrameMode::Ms30 => 22usize,
+        };
+        // Energy of the leading boundary slot vs the trailing boundary
+        // slot. The slot we keep for scalar coding is the one with the
+        // higher energy (more bits per sample preserves it best); the
+        // opposite slot is what the boundary CB sees as its target.
+        let mut e_leading_boundary = 0.0f32;
+        for &r in &residual[0..boundary_samples] {
+            e_leading_boundary += r * r;
+        }
+        let mut e_trailing_boundary = 0.0f32;
+        for &r in &residual[(STATE_LEN - boundary_samples)..STATE_LEN] {
+            e_trailing_boundary += r * r;
+        }
+        // position == 1: scalar at [0..n_short], boundary at [n_short..STATE_LEN].
+        //                Drop the trailing slot (more energy → bigger error
+        //                if CB-coded) means we KEEP it scalar — i.e. pick
+        //                position=1 when the leading boundary slot has
+        //                LESS energy than the trailing one.
+        // position == 0: boundary at [0..boundary_samples], scalar at [boundary_samples..STATE_LEN].
+        // RFC §3.5.1 picks position based on which boundary slot has
+        // less energy ("drop the quieter one into the CB block"). In
+        // practice the all-pole synthesis filter at the decoder side
+        // amplifies excitation errors that occur EARLY in the frame
+        // (samples ripple through the LPC feedback for the rest of the
+        // frame), so dropping CB content into the leading slot
+        // (position = 0) costs measurable PCM-domain SNR even when the
+        // residual energies say it should help. We require a
+        // significant energy ratio (≥ 4×) before switching to position
+        // = 0 — small/marginal energy differences are not worth the
+        // IIR error-propagation penalty. This keeps us spec-compliant
+        // (we WILL pick position=0 when the leading slot is genuinely
+        // the quiet one, e.g. voiced onsets) while protecting steady-
+        // signal SNR.
+        let position: u8 = if e_trailing_boundary > 4.0 * e_leading_boundary {
+            // Trailing slot dominates the energy — drop the leading
+            // (quieter) slot into the boundary CB.
+            0
+        } else {
+            1
+        };
+        let scalar_offset = if position == 1 { 0 } else { boundary_samples };
+        let boundary_offset = if position == 1 { n_short } else { 0 };
+
+        let state_residual_slice = &residual[scalar_offset..(scalar_offset + n_short)];
         let ccres = crate::state_encode::allpass_forward(state_residual_slice, &a_for_phase);
         let scale_idx = crate::state_encode::quantise_scale(&ccres);
         let qmax = crate::state::STATE_FRGQ_TBL[scale_idx as usize];
@@ -301,35 +348,28 @@ impl IlbcEncoder {
         // The reconstructed scalar state the decoder will produce.
         let scalar_state =
             crate::state::reconstruct_scalar_state(mode, scale_idx, &state_samples, &a_for_phase);
-        // The decoder seeds the 80-sample state vector with the scalar
-        // state at indices 0..STATE_SHORT_LEN, leaving the boundary span
-        // (STATE_SHORT_LEN..80) to be filled by the boundary CB search.
+        // Build the 80-sample state_vec exactly as the decoder will:
+        // scalar_state in its position-selected slot, boundary slot
+        // zero (the boundary CB pass below fills it in).
         let mut state_vec = [0.0f32; STATE_LEN];
-        let copy_len = scalar_state.len().min(STATE_LEN);
-        state_vec[..copy_len].copy_from_slice(&scalar_state[..copy_len]);
+        for (k, &s) in scalar_state.iter().enumerate() {
+            let dst = scalar_offset + k;
+            if dst < STATE_LEN {
+                state_vec[dst] = s;
+            }
+        }
 
         // Reset the CB memory the way the decoder does at the start of
-        // every frame: zero-pad before STATE_LEN-CB_LMEM, then the state
-        // vector goes at the tail.
+        // every frame: zero-pad before CB_LMEM-STATE_LEN, then the
+        // (partially populated) state vector goes at the tail.
         let pad = CB_LMEM - STATE_LEN;
         self.cb_mem[..pad].fill(0.0);
         self.cb_mem[pad..].copy_from_slice(&state_vec);
 
         // ---- 5. Boundary CB search (22/23 samples) ----
-        let boundary_samples = match mode {
-            FrameMode::Ms20 => 23usize,
-            FrameMode::Ms30 => 22usize,
-        };
-        // Target: the residual positions [STATE_SHORT_LEN..STATE_LEN).
-        let target_boundary: Vec<f32> = residual
-            [mode.state_short_len()..STATE_LEN.min(mode.state_short_len() + boundary_samples)]
-            .to_vec();
-        // Pad to `boundary_samples` in case STATE_LEN < state_short_len+boundary
-        // (shouldn't happen — boundary is always 2*SUBL - state_short_len).
-        let mut target_boundary = target_boundary;
-        while target_boundary.len() < boundary_samples {
-            target_boundary.push(0.0);
-        }
+        // Target = residual at the boundary slot.
+        let target_boundary: Vec<f32> =
+            residual[boundary_offset..(boundary_offset + boundary_samples)].to_vec();
         // Per RFC 3951 §3.6.1 the boundary block uses lMem = 85 samples
         // (not the full 147), so the search runs against the last 85
         // entries of the CB memory; per Table 3.1 each stage has 128
@@ -342,9 +382,9 @@ impl IlbcEncoder {
             &[128; 3],
         );
         // Update cb_mem / state_vec exactly as the decoder will. The
-        // decoder adds `boundary_exc[i]` to `excitation[STATE_LEN -
-        // boundary_samples + i]` and also pushes `boundary_exc` as a
-        // full SUBL-sample block into the CB memory (padded with zeros).
+        // decoder adds `boundary_exc[i]` to `excitation[boundary_offset
+        // + i]` and also pushes `boundary_exc` as a full SUBL-sample
+        // block into the CB memory (padded with zeros).
         let mut boundary_block = [0.0f32; SUBL];
         let copy_n = boundary_samples.min(SUBL);
         boundary_block[..copy_n].copy_from_slice(&boundary_rec[..copy_n]);
@@ -397,7 +437,7 @@ impl IlbcEncoder {
             mode,
             lsf_idx,
             block_class: 1, // start_idx = 0 ⇒ block_class index = 1 (1-based)
-            position: 1,    // decoder pins state to sub-blocks 0-1
+            position,       // RFC §3.5.1 selection — see step 4 above
             scale_idx,
             state_samples,
             boundary: CbStageIndices {
