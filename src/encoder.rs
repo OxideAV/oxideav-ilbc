@@ -14,23 +14,29 @@
 //!   a_per_sub[n_sub]
 //!     ↓ LPC analysis filter                              (§3.3)
 //!   residual[n_sub·40]
+//!     ↓ frame_classify -> start ∈ {1..n_sub-1}           (§3.5.1)
 //!     ↓ pick state span / position                       (§3.5.1)
 //!     ↓ all-pass + log-magnitude + shape 3-bit scalar VQ (§3.5.2-3)
 //!   scale_idx + state_samples[57/58]
 //!     ↓ rebuild state_vec from the *decoded* samples so the CB memory
 //!       evolves identically to the decoder.
-//!     ↓ for each CB sub-block (boundary 22/23 + 40-sample sub-blocks)
-//!       run a 3-stage CB search                          (§3.6)
+//!     ↓ boundary CB (22/23 samples) + forward CB walk (Nfor sub-blocks)
+//!       + backward CB walk (Nback sub-blocks, in reversed time)  (§3.6)
 //!   CB indices + gain indices
 //!     ↓ pack Table 3.2                                   (§3.7/3.8)
 //!   38/50-byte iLBC payload.
 //! ```
 //!
-//! The decoder currently pins `start_idx = 0` (the state vector drives
-//! sub-blocks 0 and 1 unconditionally and CB sub-blocks start at
-//! sub-block 2). We emit `block_class = 1` to match, independent of
-//! where the speech energy actually peaks. The CB targets for
-//! sub-blocks 2..n_sub are the residual samples `[80, frame_len)`.
+//! The encoder picks `start ∈ {1..n_sub-1}` per RFC §3.5.1 (variable
+//! `start_idx`), then walks the codebook sub-blocks symmetrically
+//! around the start state: `Nfor = n_sub - start - 1` forward
+//! sub-blocks at `[(start+1)*SUBL ..]` (cb_mem seeded with the decoded
+//! state vector at `[(start-1)*SUBL ..]`), then `Nback = start - 1`
+//! backward sub-blocks at `[0 .. (start-1)*SUBL]` (cb_mem seeded with
+//! the time-reversed decoded state vector). The encoded sub-block
+//! order on the wire is `[forward..., backward_reversed...]`, so
+//! `sub_blocks[0]` is the first forward sub-block when `Nfor > 0`,
+//! else the first backward sub-block.
 
 use std::collections::VecDeque;
 
@@ -49,6 +55,96 @@ use crate::lsf::{decode_and_interpolate, dequant_lsf, LsfState};
 use crate::lsf_quant::quantise_lsf;
 use crate::state_encode::lpc_analysis_filter;
 use crate::{FrameMode, CB_LMEM, CODEC_ID_STR, LPC_ORDER, SAMPLE_RATE, STATE_LEN, SUBL};
+
+/// RFC 3951 §3.5.1 / Appendix A.20 `FrameClassify`.
+///
+/// Picks the index of the highest-energy two-sub-block window in the
+/// frame's LPC residual. Returns `start ∈ {1..n_sub-1}` (1-based, so
+/// the state span covers sub-blocks `start-1` and `start`).
+///
+/// Energy is windowed at the sub-block edges to bias the classifier
+/// toward speech mid-frame; a per-window `ssqEn_win` bias further
+/// favours the centre. Both tables are verbatim from Appendix A.20.
+fn frame_classify(mode: FrameMode, residual: &[f32]) -> usize {
+    let n_sub = mode.sub_blocks();
+    debug_assert_eq!(residual.len(), n_sub * SUBL);
+    // RFC Appendix A.20: ssqEn_win has NSUB-1 entries, indexed so that
+    // the max-window weight applies to the centre sub-block pair.
+    // For 30 ms (NSUB=6, 5 windows): {0.8, 0.9, 1.0, 0.9, 0.8}.
+    // For 20 ms (NSUB=4, 3 windows): the reference uses
+    // ssqEn_win[1..=3] -> {0.9, 1.0, 0.9}, i.e. the centre 3 entries
+    // of the 30 ms table. We follow the reference's `l = mode==20 ? 1
+    // : 0` indexing exactly.
+    const SSQ_EN_WIN: [f32; 5] = [0.8, 0.9, 1.0, 0.9, 0.8];
+    const SAMP_EN_WIN: [f32; 5] = [1.0 / 6.0, 2.0 / 6.0, 3.0 / 6.0, 4.0 / 6.0, 5.0 / 6.0];
+
+    // Front-of-sub-block (`fssqEn`) and back-of-sub-block (`bssqEn`)
+    // energies. Each entry is the windowed energy of a single 40-sample
+    // sub-block; the candidate two-sub-block windows then sum
+    // `fssqEn[n-1] + bssqEn[n]`.
+    let mut fssq = vec![0.0f32; n_sub];
+    let mut bssq = vec![0.0f32; n_sub];
+
+    // First sub-block: front only.
+    for (l, &v) in residual.iter().take(5).enumerate() {
+        fssq[0] += SAMP_EN_WIN[l] * v * v;
+    }
+    for &v in residual.iter().take(SUBL).skip(5) {
+        fssq[0] += v * v;
+    }
+
+    // Middle sub-blocks: both front and back energies.
+    for n in 1..n_sub - 1 {
+        let base = n * SUBL;
+        let sub = &residual[base..base + SUBL];
+        for (l, &v) in sub.iter().take(5).enumerate() {
+            fssq[n] += SAMP_EN_WIN[l] * v * v;
+            bssq[n] += v * v;
+        }
+        for &v in sub.iter().take(SUBL - 5).skip(5) {
+            fssq[n] += v * v;
+            bssq[n] += v * v;
+        }
+        for (l, &v) in sub.iter().enumerate().take(SUBL).skip(SUBL - 5) {
+            fssq[n] += v * v;
+            bssq[n] += SAMP_EN_WIN[SUBL - l - 1] * v * v;
+        }
+    }
+
+    // Last sub-block: back only.
+    let n_last = n_sub - 1;
+    let base = n_last * SUBL;
+    let sub = &residual[base..base + SUBL];
+    for &v in sub.iter().take(SUBL - 5) {
+        bssq[n_last] += v * v;
+    }
+    for (l, &v) in sub.iter().enumerate().take(SUBL).skip(SUBL - 5) {
+        bssq[n_last] += SAMP_EN_WIN[SUBL - l - 1] * v * v;
+    }
+
+    // Find the windowed maximum. Reference uses `l = (mode==20) ? 1 :
+    // 0` then increments `l` per candidate. So:
+    //   20 ms (n_sub=4): candidates n in {1,2,3}, window weights
+    //                     SSQ_EN_WIN[{1,2,3}] = {0.9, 1.0, 0.9}.
+    //   30 ms (n_sub=6): candidates n in {1..5}, window weights
+    //                     SSQ_EN_WIN[{0,1,2,3,4}] = {0.8,0.9,1.0,0.9,0.8}.
+    let mut l: usize = if matches!(mode, FrameMode::Ms20) {
+        1
+    } else {
+        0
+    };
+    let mut max_e = (fssq[0] + bssq[1]) * SSQ_EN_WIN[l];
+    let mut max_n = 1usize;
+    for n in 2..n_sub {
+        l += 1;
+        let e = (fssq[n - 1] + bssq[n]) * SSQ_EN_WIN[l.min(SSQ_EN_WIN.len() - 1)];
+        if e > max_e {
+            max_e = e;
+            max_n = n;
+        }
+    }
+    max_n
+}
 
 /// Length of the encoder's input buffer per LPC analysis: 240 samples
 /// (80 lookback + 160 current for 20 ms, or 60 lookback + 240 current
@@ -130,9 +226,6 @@ struct IlbcEncoder {
     /// Encoder-side LPC analysis filter memory, used to carry the
     /// residual pipeline across frames.
     lpc_mem: [f32; LPC_ORDER],
-    /// 147-sample adaptive codebook memory, kept in lockstep with the
-    /// decoder's own `cb_mem`.
-    cb_mem: [f32; CB_LMEM],
     /// Previous frame's per-sub-block LPC denominators. Mirrors the
     /// decoder's `old_a_per_sub`: the §4.7 enhancer-delay shift means
     /// the FIRST `shift` sub-blocks of the current frame are synthesised
@@ -168,7 +261,6 @@ impl IlbcEncoder {
             lookback,
             lsf_state: LsfState::new(),
             lpc_mem: [0.0; LPC_ORDER],
-            cb_mem: [0.0; CB_LMEM],
             old_a_per_sub: vec![identity; 6],
             hp_state: HpInputState::default(),
             hp_filter_on,
@@ -276,66 +368,67 @@ impl IlbcEncoder {
             residual[lo..hi].copy_from_slice(&out);
         }
 
-        // ---- 4. Start-state encoding. We pin the state span to
-        //         sub-blocks 0 and 1 (block_class = 1) but pick the
-        //         `position` bit per RFC §3.5.1 so the lower-energy
-        //         half of the state span is the one that gets boundary-
-        //         CB-coded (22/23 samples / 21 bits) instead of the
-        //         scalar-coded one (57/58 × 3 bits + 6-bit scale).
+        // ---- 4. Start-state encoding (RFC §3.5.1, variable `start_idx`) ----
         //
-        // The decoder uses `a_per_sub[0]` (the current frame's first
-        // sub-block LPC) for the state's all-pass phase compensation
-        // (decoder.rs:109). We mirror that exactly so encoder and
-        // decoder stay in lockstep on the scalar-state reconstruction.
-        let a_for_phase = a_per_sub[0];
+        // Pick `start ∈ {1..n_sub-1}` via the windowed-energy classifier
+        // (RFC §3.5.1 / Appendix A.20 `FrameClassify`), then choose the
+        // `position` bit (`state_first` in the reference) so the lower-
+        // energy 22/23-sample slot of the 80-sample state span gets the
+        // boundary CB and the higher-energy 57/58-sample slot is scalar
+        // coded.
         let n_short = mode.state_short_len();
-        let boundary_samples = match mode {
-            FrameMode::Ms20 => 23usize,
-            FrameMode::Ms30 => 22usize,
-        };
-        // Energy of the leading boundary slot vs the trailing boundary
-        // slot. The slot we keep for scalar coding is the one with the
-        // higher energy (more bits per sample preserves it best); the
-        // opposite slot is what the boundary CB sees as its target.
-        let mut e_leading_boundary = 0.0f32;
-        for &r in &residual[0..boundary_samples] {
-            e_leading_boundary += r * r;
-        }
-        let mut e_trailing_boundary = 0.0f32;
-        for &r in &residual[(STATE_LEN - boundary_samples)..STATE_LEN] {
-            e_trailing_boundary += r * r;
-        }
-        // position == 1: scalar at [0..n_short], boundary at [n_short..STATE_LEN].
-        //                Drop the trailing slot (more energy → bigger error
-        //                if CB-coded) means we KEEP it scalar — i.e. pick
-        //                position=1 when the leading boundary slot has
-        //                LESS energy than the trailing one.
-        // position == 0: boundary at [0..boundary_samples], scalar at [boundary_samples..STATE_LEN].
-        // RFC §3.5.1 picks position based on which boundary slot has
-        // less energy ("drop the quieter one into the CB block"). In
-        // practice the all-pole synthesis filter at the decoder side
-        // amplifies excitation errors that occur EARLY in the frame
-        // (samples ripple through the LPC feedback for the rest of the
-        // frame), so dropping CB content into the leading slot
-        // (position = 0) costs measurable PCM-domain SNR even when the
-        // residual energies say it should help. We require a
-        // significant energy ratio (≥ 4×) before switching to position
-        // = 0 — small/marginal energy differences are not worth the
-        // IIR error-propagation penalty. This keeps us spec-compliant
-        // (we WILL pick position=0 when the leading slot is genuinely
-        // the quiet one, e.g. voiced onsets) while protecting steady-
-        // signal SNR.
-        let position: u8 = if e_trailing_boundary > 4.0 * e_leading_boundary {
-            // Trailing slot dominates the energy — drop the leading
-            // (quieter) slot into the boundary CB.
-            0
-        } else {
-            1
-        };
-        let scalar_offset = if position == 1 { 0 } else { boundary_samples };
-        let boundary_offset = if position == 1 { n_short } else { 0 };
+        let diff = STATE_LEN - n_short; // boundary block length: 23 (20ms) / 22 (30ms)
+        let boundary_samples = diff;
+        let start = frame_classify(mode, &residual);
+        debug_assert!((1..n_sub).contains(&start));
+        let span_lo = (start - 1) * SUBL;
 
-        let state_residual_slice = &residual[scalar_offset..(scalar_offset + n_short)];
+        // Energy of the leading 57/58 samples vs the trailing 57/58
+        // samples of the state span. RFC §3.5.1 keeps the higher-energy
+        // slot for scalar coding (more bits/sample). Reference
+        // implementation: encode.c lines 3087-3103.
+        let mut en1 = 0.0f32;
+        for &r in &residual[span_lo..(span_lo + n_short)] {
+            en1 += r * r;
+        }
+        let mut en2 = 0.0f32;
+        for &r in &residual[(span_lo + diff)..(span_lo + diff + n_short)] {
+            en2 += r * r;
+        }
+        // position == 1 (state_first==1): scalar at the LEADING n_short
+        //   samples of the state span, boundary at the trailing diff.
+        // position == 0 (state_first==0): boundary at the LEADING diff
+        //   samples, scalar at the trailing n_short.
+        //
+        // The reference picks `state_first=1` when `en1 > en2` (the
+        // leading 57/58-sample window holds more energy → keep it
+        // scalar). For our self-roundtrip-shaped tuning we apply an
+        // extra IIR-error-propagation guard on top of the spec rule:
+        // the all-pole synthesis filter amplifies excitation errors
+        // that occur EARLY in the frame, so we only switch to
+        // position=0 when the trailing slot energy genuinely dominates
+        // (≥ 4×). On marginal energy differences position=1 is the
+        // safer choice for PCM-domain SNR. This keeps us spec-aligned
+        // (we WILL pick position=0 on voiced onsets where the leading
+        // slot is the quiet one) while protecting steady-signal SNR.
+        let position: u8 = if en2 > 4.0 * en1 { 0 } else { 1 };
+        let start_pos = if position == 1 {
+            span_lo
+        } else {
+            span_lo + diff
+        };
+        let boundary_pos = if position == 1 {
+            span_lo + n_short
+        } else {
+            span_lo
+        };
+
+        // Decoder uses `a_per_sub[start-1]` for the all-pass phase
+        // compensation — i.e. the LPC of the first sub-block in the
+        // state span (reference `decode.c` line 3713,
+        // `&syntdenum[(start-1)*(LPC_FILTERORDER+1)]`). Mirror that.
+        let a_for_phase = a_per_sub[start - 1];
+        let state_residual_slice = &residual[start_pos..(start_pos + n_short)];
         let ccres = crate::state_encode::allpass_forward(state_residual_slice, &a_for_phase);
         let scale_idx = crate::state_encode::quantise_scale(&ccres);
         let qmax = crate::state::STATE_FRGQ_TBL[scale_idx as usize];
@@ -348,96 +441,209 @@ impl IlbcEncoder {
         // The reconstructed scalar state the decoder will produce.
         let scalar_state =
             crate::state::reconstruct_scalar_state(mode, scale_idx, &state_samples, &a_for_phase);
-        // Build the 80-sample state_vec exactly as the decoder will:
-        // scalar_state in its position-selected slot, boundary slot
-        // zero (the boundary CB pass below fills it in).
-        let mut state_vec = [0.0f32; STATE_LEN];
+
+        // Build a frame-length `decresidual` buffer so the symmetric
+        // forward+backward CB walks below see exactly the same memory
+        // the decoder will see. The state span occupies 80 samples
+        // starting at `span_lo`; we write the scalar state into the
+        // appropriate half and let the boundary CB step (next) fill
+        // the other half.
+        let mut decresidual = vec![0.0f32; samples];
         for (k, &s) in scalar_state.iter().enumerate() {
-            let dst = scalar_offset + k;
-            if dst < STATE_LEN {
-                state_vec[dst] = s;
-            }
+            decresidual[start_pos + k] = s;
         }
 
-        // Reset the CB memory the way the decoder does at the start of
-        // every frame: zero-pad before CB_LMEM-STATE_LEN, then the
-        // (partially populated) state vector goes at the tail.
-        let pad = CB_LMEM - STATE_LEN;
-        self.cb_mem[..pad].fill(0.0);
-        self.cb_mem[pad..].copy_from_slice(&state_vec);
-
         // ---- 5. Boundary CB search (22/23 samples) ----
-        // Target = residual at the boundary slot.
-        let target_boundary: Vec<f32> =
-            residual[boundary_offset..(boundary_offset + boundary_samples)].to_vec();
-        // Per RFC 3951 §3.6.1 the boundary block uses lMem = 85 samples
-        // (not the full 147), so the search runs against the last 85
-        // entries of the CB memory; per Table 3.1 each stage has 128
-        // entries (64 base + 64 expanded), so the cap is 128 throughout.
-        let boundary_mem = &self.cb_mem[CB_LMEM - 85..];
+        //
+        // The boundary slot lives at `[boundary_pos .. boundary_pos +
+        // boundary_samples]` within the state span. CB memory layout
+        // (RFC §3.6.1, Appendix A.34 lines 3118-3170):
+        //   - state_first==1 (boundary trailing): cb_mem tail = the
+        //     scalar-decoded state samples; the boundary search uses
+        //     the last `stMemLTbl=85` entries.
+        //   - state_first==0 (boundary leading): cb_mem tail =
+        //     time-reversed scalar samples; boundary samples are then
+        //     time-reversed back into `decresidual[span_lo..span_lo +
+        //     diff]` after the search.
+        let stmeml = 85usize;
+        let mut boundary_mem = vec![0.0f32; CB_LMEM];
+        if position == 1 {
+            // Tail-fill with scalar samples.
+            boundary_mem[CB_LMEM - n_short..].copy_from_slice(&scalar_state);
+        } else {
+            // Tail-fill with time-reversed scalar samples (reference
+            // `mem[CB_MEML-1-k] = decresidual[start_pos + k]`).
+            for k in 0..n_short {
+                boundary_mem[CB_LMEM - 1 - k] = scalar_state[k];
+            }
+        }
+        // Search target: residual samples at the boundary slot, time-
+        // reversed when state_first==0 (reference
+        // `reverseResidual[k] = residual[(start+1)*SUBL-1 - (k +
+        // state_short_len)]`).
+        let target_boundary: Vec<f32> = if position == 1 {
+            residual[boundary_pos..(boundary_pos + boundary_samples)].to_vec()
+        } else {
+            (0..boundary_samples)
+                .map(|k| residual[span_lo + STATE_LEN - 1 - (k + n_short)])
+                .collect()
+        };
+        let boundary_mem_slice = &boundary_mem[CB_LMEM - stmeml..];
         let (boundary_res, boundary_rec) = search_cb_capped_with_gain_correction(
-            boundary_mem,
+            boundary_mem_slice,
             boundary_samples,
             &target_boundary,
             &[128; 3],
         );
-        // Update cb_mem / state_vec exactly as the decoder will. The
-        // decoder adds `boundary_exc[i]` to `excitation[boundary_offset
-        // + i]` and also pushes `boundary_exc` as a full SUBL-sample
-        // block into the CB memory (padded with zeros).
-        let mut boundary_block = [0.0f32; SUBL];
-        let copy_n = boundary_samples.min(SUBL);
-        boundary_block[..copy_n].copy_from_slice(&boundary_rec[..copy_n]);
-        update_cb_memory(&mut self.cb_mem, &boundary_block);
-
-        // ---- 6. Remaining 40-sample sub-blocks: residual-domain CB search ----
-        // RFC 3951 §3.6 (and the reference `iCBSearch` in Appendix A.34) does
-        // the codebook search in the residual domain — target = LPC residual,
-        // codebook memory = previously-decoded residual. Our `search_cb`
-        // reproduces that flow; the perceptual weighting filter is omitted
-        // (it is OPTIONAL per RFC §3.4) which makes the search identical to
-        // the reference's behaviour with the weighting filter set to identity.
-        let n_cb_sub = mode.cb_sub_blocks();
-        let mut sub_block_indices = Vec::with_capacity(n_cb_sub);
-        for cb_i in 0..n_cb_sub {
-            let sb = 2 + cb_i;
-            let lo = sb * SUBL;
-            let hi = lo + SUBL;
-            if hi > samples {
-                sub_block_indices.push(CbStageIndices::default());
-                continue;
+        // Write the decoded boundary samples back into `decresidual`.
+        if position == 1 {
+            for (k, &v) in boundary_rec.iter().take(boundary_samples).enumerate() {
+                decresidual[boundary_pos + k] = v;
             }
-            // Per Table 3.2, the FIRST 40-sample sub-block after the state
-            // (`cb_i == 0`) has codebook size 128 for stages 1 and 2 (8/7/7
-            // bits); subsequent sub-blocks have 256 for all stages. We cap
-            // the search range here so the encoder never picks an index it
-            // cannot encode.
-            let stage12_cap = if cb_i == 0 { 128usize } else { 256usize };
-            let target: [f32; SUBL] = core::array::from_fn(|i| residual[lo + i]);
-            let (res, excitation) = search_cb_capped_with_gain_correction(
-                &self.cb_mem,
-                SUBL,
-                &target,
-                &[256, stage12_cap, stage12_cap],
-            );
-            let mut exc_arr = [0.0f32; SUBL];
-            exc_arr.copy_from_slice(&excitation);
-            update_cb_memory(&mut self.cb_mem, &exc_arr);
-            sub_block_indices.push(CbStageIndices {
-                cb_idx: res.cb_idx,
-                gain_idx: res.gain_idx,
-            });
+        } else {
+            // Reverse-time write — reference: `decresidual[start_pos -
+            // 1 - k] = reverseDecresidual[k]`.
+            for (k, &v) in boundary_rec.iter().take(boundary_samples).enumerate() {
+                decresidual[start_pos - 1 - k] = v;
+            }
         }
         // Silence the "unused" warning in case the analysis-by-synthesis
         // search is re-enabled later.
         let _ = search_cb_abs;
 
+        // ---- 6. Forward + backward CB sub-block walks (RFC §3.6) ----
+        //
+        // After the start state is encoded, the codebook search proceeds
+        // in two passes (reference encode.c lines 3204-3345):
+        //
+        //   * Forward (`Nfor = n_sub - start - 1`): sub-blocks at
+        //     `[(start+1)*SUBL ..]`, in forward time. cb_mem seeded
+        //     with the full 80-sample decoded state span at
+        //     `decresidual[(start-1)*SUBL ..]`.
+        //
+        //   * Backward (`Nback = start - 1`): sub-blocks at
+        //     `[0 .. (start-1)*SUBL]`, encoded in reversed time.
+        //     cb_mem seeded with the time-reversed tail of the decoded
+        //     state span (and any forward sub-blocks that were just
+        //     decoded — though the reference resets cb_mem before this
+        //     pass and only seeds with the state span).
+        //
+        // The wire emission order is `[forward..., backward...]`, so
+        // `subcount` increments through both passes — `sub_blocks[0]`
+        // gets stage-2/3 widths of (7,7) and the rest get (8,8).
+        let n_cb_sub = mode.cb_sub_blocks();
+        let mut sub_block_indices: Vec<CbStageIndices> = Vec::with_capacity(n_cb_sub);
+
+        // ---- 6a. Forward pass ----
+        let n_for = n_sub.saturating_sub(start + 1);
+        if n_for > 0 {
+            // Seed cb_mem with the decoded state span (80 samples) at
+            // its tail; zero before that.
+            let mut mem = [0.0f32; CB_LMEM];
+            mem[CB_LMEM - STATE_LEN..].copy_from_slice(&decresidual[span_lo..span_lo + STATE_LEN]);
+            for fb in 0..n_for {
+                let sb = start + 1 + fb;
+                let lo = sb * SUBL;
+                let hi = lo + SUBL;
+                if hi > samples {
+                    sub_block_indices.push(CbStageIndices::default());
+                    continue;
+                }
+                let stage12_cap = if sub_block_indices.is_empty() {
+                    128usize // first emitted sub-block: stage2/3 = 7 bits
+                } else {
+                    256usize // 8 bits
+                };
+                let target: [f32; SUBL] = core::array::from_fn(|i| residual[lo + i]);
+                let (res, excitation) = search_cb_capped_with_gain_correction(
+                    &mem,
+                    SUBL,
+                    &target,
+                    &[256, stage12_cap, stage12_cap],
+                );
+                let mut exc_arr = [0.0f32; SUBL];
+                exc_arr.copy_from_slice(&excitation);
+                // Update cb_mem (shift-and-append) for the next stage.
+                let mut mem_arr: [f32; CB_LMEM] = mem;
+                update_cb_memory(&mut mem_arr, &exc_arr);
+                mem = mem_arr;
+                // Write decoded excitation into `decresidual` so the
+                // backward pass — which reads from positions BEFORE the
+                // state span — sees a consistent buffer.
+                decresidual[lo..hi].copy_from_slice(&excitation);
+                sub_block_indices.push(CbStageIndices {
+                    cb_idx: res.cb_idx,
+                    gain_idx: res.gain_idx,
+                });
+            }
+        }
+
+        // ---- 6b. Backward pass ----
+        let n_back = start.saturating_sub(1);
+        if n_back > 0 {
+            // Reference encode.c lines 3273-3293: build a reversed
+            // mirror of `residual[..(start-1)*SUBL]` and seed cb_mem
+            // with the time-reversed decoded samples that immediately
+            // follow the boundary in the original buffer (i.e. the
+            // state span's `decresidual[(start-1)*SUBL ..]`, capped
+            // at CB_LMEM samples).
+            let meml_gotten = (SUBL * (n_sub + 1 - start)).min(CB_LMEM);
+            let mut mem = [0.0f32; CB_LMEM];
+            for k in 0..meml_gotten {
+                // mem[CB_MEML-1-k] = decresidual[(start-1)*SUBL + k]
+                mem[CB_LMEM - 1 - k] = decresidual[span_lo + k];
+            }
+            for bf in 0..n_back {
+                let stage12_cap = if sub_block_indices.is_empty() {
+                    128usize
+                } else {
+                    256usize
+                };
+                // Reversed target: residual[(start-1)*SUBL - 1 - bf*SUBL - k]
+                // for k in 0..SUBL.
+                let target: [f32; SUBL] =
+                    core::array::from_fn(|k| residual[span_lo - 1 - bf * SUBL - k]);
+                let (res, excitation) = search_cb_capped_with_gain_correction(
+                    &mem,
+                    SUBL,
+                    &target,
+                    &[256, stage12_cap, stage12_cap],
+                );
+                let mut exc_arr = [0.0f32; SUBL];
+                exc_arr.copy_from_slice(&excitation);
+                let mut mem_arr: [f32; CB_LMEM] = mem;
+                update_cb_memory(&mut mem_arr, &exc_arr);
+                mem = mem_arr;
+                // Write decoded excitation back into `decresidual` in
+                // reverse-time (reference: `decresidual[SUBL*Nback - i
+                // - 1] = reverseDecresidual[i]`). For backward-pass
+                // sub-block `bf`, the corresponding original-time
+                // sub-block is `start - 2 - bf` (counting from 0).
+                let orig_sb = start - 2 - bf;
+                let orig_lo = orig_sb * SUBL;
+                for k in 0..SUBL {
+                    // reverseDecresidual[bf*SUBL + k] -> decresidual[span_lo - 1 - bf*SUBL - k]
+                    decresidual[span_lo - 1 - bf * SUBL - k] = excitation[k];
+                }
+                let _ = orig_lo;
+                sub_block_indices.push(CbStageIndices {
+                    cb_idx: res.cb_idx,
+                    gain_idx: res.gain_idx,
+                });
+            }
+        }
+
+        debug_assert_eq!(sub_block_indices.len(), n_cb_sub);
+
         // ---- 7. Pack ----
         let params = PackParams {
             mode,
             lsf_idx,
-            block_class: 1, // start_idx = 0 ⇒ block_class index = 1 (1-based)
-            position,       // RFC §3.5.1 selection — see step 4 above
+            // RFC §3.5.1 encodes the start-state position as 1-based
+            // `start ∈ {1..n_sub-1}` directly. 20 ms uses 2 bits
+            // (values {1,2,3}); 30 ms uses 3 bits (values {1..5}).
+            block_class: start as u8,
+            position, // RFC §3.5.1 `state_first`
             scale_idx,
             state_samples,
             boundary: CbStageIndices {

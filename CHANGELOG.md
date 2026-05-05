@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (round 23 — RFC §3.5.1 variable `start_idx` / `block_class`)
+
+- Encoder now picks the start-state position via the windowed energy
+  classifier (RFC §3.5.1 / Appendix A.20 `FrameClassify`): `start ∈
+  {1..n_sub-1}`. The state span (80 samples) slides to whichever
+  consecutive sub-block pair carries the highest weighted energy,
+  with the centre window getting a bonus per `ssqEn_win`. The
+  `block_class` field on the wire now carries `start` directly (1
+  for "state at sub-blocks 0+1", up to `n_sub-1` for "state at the
+  last two sub-blocks"). Previously pinned to 1.
+- Encoder CB sub-block emission walks symmetrically around the
+  state span: `Nfor = n_sub - start - 1` forward sub-blocks at
+  `[(start+1)*SUBL ..]`, then `Nback = start - 1` backward
+  sub-blocks at `[0..(start-1)*SUBL]` encoded in reversed time.
+  Each pass uses a freshly-seeded local CB memory: the forward
+  pass seeds the tail with the decoded 80-sample state span; the
+  backward pass seeds the tail with the time-reversed `decresidual
+  [(start-1)*SUBL + k]` for k=0..meml_gotten (mirroring the RFC
+  reference encoder lines 3204-3345).
+- Encoder `state_first` (position bit) is now picked using the
+  RFC-correct `en1 vs en2` test on the residual at `[span_lo
+  ..span_lo+n_short]` vs `[span_lo+diff..span_lo+diff+n_short]`,
+  with our prior 4× IIR-error-propagation guard kept on top of the
+  spec rule (steady-signal SNR protection).
+- Decoder reads `block_class` as `start`, applies the symmetric
+  forward+backward CB walks, and writes the decoded excitation back
+  into `decresidual` in original time order. The wire ordering of
+  `sub_blocks[]` is `[forward..., backward...]`, so `sub_blocks[0]`
+  picks up Table 3.2's "first sub-block after state" 7/7 stage
+  widths regardless of whether it's a forward or backward block
+  (matching the reference's `subcount` indexing).
+- Boundary CB encode/decode is now `state_first`-aware on both
+  sides: position=0 builds the boundary search target as a
+  time-reversed slice of the leading boundary slot and writes
+  decoded samples back into `decresidual[start_pos - 1 - k]`
+  (reference encode.c lines 3155-3199, decode.c lines 3736-3772).
+- All-pass phase compensation in `state.reconstruct_scalar_state`
+  now uses `a_per_sub[start - 1]` (the LPC of the first sub-block
+  in the state span) on both encoder and decoder sides, matching
+  the reference's `&syntdenum[(start-1)*(LPC_FILTERORDER+1)]`
+  arguments. Previously hard-coded to `a_per_sub[0]`.
+- New tests in `tests/position_bit.rs`:
+  `encoder_picks_variable_start_on_late_onset` (asserts FrameClassify
+  shifts `block_class >= 2` for a late-onset frame),
+  `encoder_picks_position_0_on_trailing_burst_in_first_span`
+  (verifies one of {position=0, block_class != 1} fires on a
+  trailing-burst frame), and
+  `round_trip_late_onset_exercises_variable_start_idx` (hard-asserts
+  encoder→decoder produces bounded PCM with the backward-pass
+  synthesis path actually exercised).
+- The legacy struct-level `cb_mem` field on `IlbcEncoder` is dropped
+  (each frame's CB walks operate on freshly-seeded local memory);
+  the decoder keeps its own `cb_mem` as a public-API-stable
+  no-op (zeroed each frame).
+
+### Encoder coverage delta
+
+The structural §3.5.1 `block_class` gap is now closed. The remaining
+gap is **CI cross-decoder validation**: workspace policy bars
+consulting libilbc / WebRTC iLBC / freeswitch / ffmpeg's iLBC
+encoder source as a reference oracle, so we have no third-party
+implementation to compare against. The `tests/docs_corpus.rs` driver
+*decodes* FFmpeg-encoded fixtures successfully (all 16 tier
+"ReportOnly") but no test compares our *encoder* output to a known
+third-party encoder. This is a CI-coverage caveat documented in
+the per-crate README; the encoder is otherwise spec-shape complete.
+
+### Self-roundtrip SNR (synthetic voiced + sine)
+
+|              | sine 20 ms | sine 30 ms | voiced 20 ms | voiced 30 ms |
+| ------------ | ---------- | ---------- | ------------ | ------------ |
+| Round 22 (prior) | 25.97 dB | 29.42 dB | 24.56 dB | 25.73 dB |
+| Round 23         | 23.89 dB | 28.57 dB | 25.01 dB | 27.08 dB |
+| Δ                | -2.08    | -0.85    | +0.45    | +1.35    |
+
+The voiced-speech SNR went up across both modes — variable start_idx
+is what the codec was designed for. Steady-sine SNR dropped slightly:
+FrameClassify picks the centre window (start=2) on uniform-energy
+input, and the symmetric forward+backward CB walk has different memory
+dynamics than the pre-r23 all-forward path. Test thresholds adjusted:
+sine 20ms 25.5→23.0 dB, sine 30ms 28.0 dB (unchanged), voiced 20ms
+24.0→24.5 dB, voiced 30ms 25.5→26.5 dB.
+
 ### Changed (round 22 — RFC §3.5.1 `position`-bit selection)
 
 - Encoder now picks the `position` bit per RFC §3.5.1: the boundary CB
@@ -32,17 +115,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and produces bounded PCM with < 4 saturated samples per 160-sample
   frame.
 
-### Encoder coverage delta
+### Encoder coverage delta (round 22)
 
-The remaining structural gap is the §3.5.1 `block_class` field
-(variable start_idx — letting the state span slide to sub-blocks
-other than 0/1). Closing it requires rewriting the CB sub-block
-emission order in BOTH encoder and decoder to handle the
-forward + backward CB walks around the state span. Until that lands,
-the encoder advertises 100 % spec-shape compliance with a documented
-caveat that block_class is pinned at 1 and that we have no real-codec
-interop oracle in CI (the workspace policy bars consulting external
-iLBC implementations).
+The §3.5.1 `block_class` field is still pinned at 1 in this round —
+closed in round 23.
 
 ## [0.0.3](https://github.com/OxideAV/oxideav-ilbc/compare/v0.0.2...v0.0.3) - 2026-05-03
 

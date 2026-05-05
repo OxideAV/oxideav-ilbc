@@ -65,22 +65,30 @@ PTS at the 8 kHz time base.
 - Encoder: LPC analysis (asymmetric / Hanning windowing → autocorrelation
   → Levinson-Durbin → 0.9025 chirp expansion → LSF), split-VQ LSF
   quantisation, scalar start-state coding (3-bit shape + 6-bit log scale)
-  with RFC §3.5.1 `position`-bit selection (boundary CB block placed in
-  the lower-energy slot of the 80-sample state span when the energy
-  ratio justifies the IIR error-propagation cost), residual-domain
+  with RFC §3.5.1 variable `start_idx` (windowed energy classifier picks
+  the highest-energy 80-sample state span across all `n_sub-1`
+  candidate positions; `block_class` carries the 1-based start index
+  on the wire) and `position`-bit selection (boundary CB block placed
+  in the lower-energy slot of the chosen state span when the energy
+  ratio justifies the IIR error-propagation cost). Residual-domain
   3-stage codebook search per RFC §3.6 with bit-width caps from
-  Table 3.2 / Table 3.1, RFC §3.7 stage-0 gain-correction post-pass,
-  and the §4.7 enhancer-delay LPC shift in the analysis filter.
-- Decoder: position-bit-aware boundary CB placement so the 80-sample
-  state vector reflects whichever layout the encoder picked
-  (`scalar | boundary` for position=1, `boundary | scalar` for
-  position=0). RFC §3.5 / §4.2 closed.
+  Table 3.2 / Table 3.1, walked symmetrically forward + backward
+  around the state span (Nfor sub-blocks at `[(start+1)*SUBL ..]`,
+  Nback sub-blocks at `[0..(start-1)*SUBL]` in reversed time). Plus
+  RFC §3.7 stage-0 gain-correction post-pass and the §4.7
+  enhancer-delay LPC shift in the analysis filter.
+- Decoder: variable-`start_idx`-aware reconstruction — `block_class`
+  selects the start-state sub-block pair, `position` selects within
+  that pair, and the symmetric forward+backward CB walk reproduces
+  the encoder's emission order. RFC §3.5 / §4.2 / §3.6.1 closed.
 - Self-roundtrip SNR (synthetic voiced @ 130 Hz + 4 harmonics, ~1 s):
-  - 20 ms: **24.6 dB** (round 21: +2.3 dB from r20)
-  - 30 ms: **25.7 dB** (round 21: +1.0 dB from r20)
+  - 20 ms: **25.0 dB** (round 23: +0.4 dB from r22, variable start_idx)
+  - 30 ms: **27.1 dB** (round 23: +1.4 dB from r22, variable start_idx)
 - Self-roundtrip SNR (sine):
-  - 20 ms 400 Hz: **26.0 dB** (round 21: +1.2 dB from r20)
-  - 30 ms 300 Hz: **29.4 dB** (round 21: +2.9 dB from r20)
+  - 20 ms 400 Hz: **23.9 dB** (round 23: -2.1 dB from r22 — FrameClassify
+    picks the centre window for steady tones; voiced SNR is the
+    speech-relevant metric and improved.)
+  - 30 ms 300 Hz: **28.6 dB** (round 23: -0.8 dB from r22)
 
 ### Deviations from RFC 3951
 
@@ -104,23 +112,23 @@ Flagged explicitly in each module where they apply:
   channel) the lower constraint preserves the unenhanced excitation
   and lifts the SNR floor by 1-3 dB across all four test signals.
   Reference: round 21 sweep in CHANGELOG.
-- The §3.5.1 `block_class` field (variable start-state location across
-  sub-blocks) is pinned to `start_idx = 0` (block_class = 1, state at
-  sub-blocks 0 and 1). Implementing variable start_idx requires
-  rewriting the CB sub-block emission order on both encoder and
-  decoder (forward + backward passes around the state span); the
-  current fixed layout still produces a complete bit-exact-pack /
-  bit-exact-unpack pipeline against the Table 3.2 wire format. The
-  `position` bit IS variable (round 22).
+- The `tests/docs_corpus.rs` driver decodes FFmpeg-encoded fixtures
+  successfully across all 16 cases, but every fixture is currently
+  `Tier::ReportOnly` (no PSNR-floor gating). iLBC is a CELP codec —
+  two independent decoders typically differ at the sub-LSB level due
+  to LSF→LPC rounding, all-pass phase compensator drift, the optional
+  enhancer, and post-filter; tightening to numeric floors is a
+  follow-up once the per-fixture residuals are catalogued.
 
-Net effect: structurally correct decoder that produces bounded mono
-8 kHz PCM on any well-formed 38-/50-byte iLBC payload and on empty /
-lost frames, but output is not guaranteed to be bit-exact against the
-RFC 3951 reference decoder. We have no real-codec interop oracle in
-the test suite — the workspace policy bars consulting external iLBC
-implementations (libilbc / WebRTC iLBC / freeswitch) so cross-decoder
-validation against a third-party reference would require a black-box
-binary fixture pipeline that we have not stood up.
+Net effect: structurally complete encoder + decoder that produces
+bounded mono 8 kHz PCM on any well-formed 38-/50-byte iLBC payload
+and on empty / lost frames; output is not guaranteed to be bit-exact
+against the RFC 3951 reference (CELP rounding drift) and we have no
+third-party encoder oracle in CI. Workspace policy bars consulting
+libilbc / WebRTC iLBC / freeswitch / ffmpeg's iLBC source as a
+clean-room reference, so cross-encoder validation against a known
+good third-party encoder would require a black-box binary fixture
+pipeline that we have not stood up.
 
 ### Encoder fidelity surface (RFC 3951)
 
@@ -132,10 +140,10 @@ binary fixture pipeline that we have not stood up.
 | §3.2.5-7 stabilise + per-sub-block LSF interpolation | full (matches decoder) |
 | §3.3 LPC analysis filter (with §4.7 enhancer-delay shift) | full |
 | §3.5 scalar start-state coding (3-bit shape + 6-bit log scale) | full |
-| §3.5.1 `block_class` (variable start_idx) | pinned at start_idx=0 — see deviations |
-| §3.5.1 `position` bit | full (energy-threshold heuristic) |
+| §3.5.1 `block_class` (variable `start_idx` via FrameClassify) | full (round 23 — windowed energy classifier from Appendix A.20) |
+| §3.5.1 `position` bit | full (RFC §3.5.1 `en1 vs en2` test + 4× IIR-error-propagation guard) |
 | §3.5.3 perceptual-DPCM noise-shaping loop | direct scalar quantiser substitute |
-| §3.6 multistage CB search (boundary 22/23 + 40-sample sub-blocks) | full with Table 3.1/3.2 caps |
+| §3.6 multistage CB search (boundary 22/23 + 40-sample sub-blocks, symmetric forward + backward walk) | full with Table 3.1/3.2 caps |
 | §3.6.2 perceptual weighting (`Wk(z)=1/Ak(z/0.4222)`) | implemented but disabled (round-21 sweep — regresses synthetic SNR) |
 | §3.7 stage-0 gain-correction post-pass | full |
 | §3.8 packet layout (Table 3.2 flat) + empty-frame indicator | full read+write |

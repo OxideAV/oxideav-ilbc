@@ -103,125 +103,138 @@ impl IlbcDecoder {
         let a_per_sub = decode_and_interpolate(&mut self.lsf_state, fp.mode, &lsf_vectors);
         debug_assert_eq!(a_per_sub.len(), fp.mode.sub_blocks());
 
-        // Reconstruct start state. Use the first sub-block's LPC for
-        // the all-pass phase compensation (which currently is a no-op
-        // — see state.rs).
-        let a_first: [f32; LPC_ORDER + 1] = a_per_sub[0];
-        let scalar_state =
-            reconstruct_scalar_state(fp.mode, fp.scale_idx, &fp.state_samples, &a_first);
-
-        // Seed the adaptive-codebook memory with the scalar state,
-        // padded to STATE_LEN samples. The 23-/22-sample boundary
-        // block will be decoded as the first CB sub-block below.
+        // ---- Variable start_idx (RFC §3.5.1) ----
         //
-        // The `position` bit (RFC 3951 §3.5 / §4.2) selects whether the
-        // boundary CB output precedes (0) or follows (1) the scalar
-        // start-state samples within the 80-sample state vector:
-        //   - position = 1: state_vec = [ scalar(n_short) | boundary(boundary_samples) ]
-        //   - position = 0: state_vec = [ boundary(boundary_samples) | scalar(n_short) ]
-        //
-        // The encoder picks whichever layout drops the boundary into the
-        // lower-energy half of the residual, leaving the higher-energy
-        // half to scalar coding (which has more bits per sample than the
-        // 22/23-sample CB).
+        // `block_class` carries the encoder's `start ∈ {1..n_sub-1}`
+        // value directly: the start state occupies sub-blocks
+        // `start-1` and `start`. The codebook walk then proceeds in
+        // two passes — `Nfor` forward sub-blocks at `[(start+1)*SUBL
+        // ..]`, then `Nback` backward sub-blocks at `[0 ..
+        // (start-1)*SUBL]` (encoded in reverse time). The wire order
+        // is `[forward..., backward...]`, so `fp.sub_blocks[0]` is
+        // the first forward sub-block when Nfor>0, else the first
+        // backward sub-block.
+        let n_sub = fp.mode.sub_blocks();
         let n_short = fp.mode.state_short_len();
-        let boundary_samples = match fp.mode {
-            FrameMode::Ms20 => 23,
-            FrameMode::Ms30 => 22,
-        };
-        debug_assert_eq!(scalar_state.len(), n_short);
-        let scalar_offset = if fp.position == 1 {
-            0
+        let diff = STATE_LEN - n_short; // 23 (20 ms) / 22 (30 ms)
+        let boundary_samples = diff;
+        // Clamp `block_class` into the legal range so a malformed
+        // packet (e.g. block_class == 0 or > n_sub-1) still produces
+        // bounded output.
+        let start = (fp.block_class as usize).clamp(1, n_sub - 1);
+        let span_lo = (start - 1) * SUBL;
+        let start_pos = if fp.position == 1 {
+            span_lo
         } else {
-            boundary_samples
+            span_lo + diff
         };
-        let boundary_offset = if fp.position == 1 { n_short } else { 0 };
-        let mut state_vec = [0.0f32; STATE_LEN];
-        // Place scalar state in its position-selected slot. boundary
-        // samples are zero in `state_vec` until the boundary CB decode
-        // below fills them in.
+        let boundary_pos = if fp.position == 1 {
+            span_lo + n_short
+        } else {
+            span_lo
+        };
+
+        // Reconstruct start state. RFC §4.2 / Appendix A.5 line 3713:
+        // the all-pass phase compensation uses the LPC of the first
+        // sub-block in the state span (`a_per_sub[start - 1]`).
+        let a_for_phase: [f32; LPC_ORDER + 1] = a_per_sub[start - 1];
+        let scalar_state =
+            reconstruct_scalar_state(fp.mode, fp.scale_idx, &fp.state_samples, &a_for_phase);
+        debug_assert_eq!(scalar_state.len(), n_short);
+
+        // `decresidual` is the frame-length excitation we will hand to
+        // synthesis. Build it incrementally — first the scalar state,
+        // then the boundary CB samples, then the forward/backward CB
+        // sub-blocks.
+        let mut decresidual = vec![0.0f32; n_sub * SUBL];
         for (k, &s) in scalar_state.iter().enumerate() {
-            let dst = scalar_offset + k;
-            if dst < STATE_LEN {
-                state_vec[dst] = s;
+            decresidual[start_pos + k] = s;
+        }
+
+        // ---- Boundary CB decode (22/23 samples) ----
+        // Mirror the encoder's cb_mem layout: scalar samples in the
+        // tail (forward) for position=1, time-reversed scalar in the
+        // tail for position=0. RFC §3.6.1 reads `stMemLTbl=85` samples.
+        let stmeml = 85usize;
+        let mut boundary_mem = vec![0.0f32; CB_LMEM];
+        if fp.position == 1 {
+            boundary_mem[CB_LMEM - n_short..].copy_from_slice(&scalar_state);
+        } else {
+            for k in 0..n_short {
+                boundary_mem[CB_LMEM - 1 - k] = scalar_state[k];
             }
         }
-        // Seed cb_mem with the partially-filled state_vec (boundary slot
-        // still zero). RFC §3.6.1 boundary search reads back lMem=85
-        // samples, of which the last `STATE_LEN` are state_vec. The
-        // lookback for the boundary block legitimately includes the
-        // scalar samples that already sit in the state_vec slot, while
-        // the boundary slot itself reads as zero.
-        for i in 0..CB_LMEM {
-            self.cb_mem[i] = if i >= CB_LMEM - STATE_LEN {
-                state_vec[i - (CB_LMEM - STATE_LEN)]
-            } else {
-                0.0
-            };
-        }
-
-        // Decode each sub-block excitation.
-        //
-        // Layout: the full `mode.sub_blocks()` frame excitation is built
-        // from three sources:
-        //   - sub-blocks 0 and 1: state vector (scalar + boundary CB),
-        //     sliced into two SUBL halves.
-        //   - sub-blocks 2..: one per entry in `fp.sub_blocks` (2 for
-        //     20 ms, 4 for 30 ms).
-        let n_sub = fp.mode.sub_blocks();
-        let mut excitation = vec![0.0f32; n_sub * SUBL];
-        // Sub-blocks 0/1: the 80-sample state vector directly drives
-        // the first two synthesis sub-blocks. The 22-/23-sample
-        // boundary CB block is used both as the CB-memory seed and to
-        // fill the boundary slot of the state vector.
-        //
-        // RFC 3951 §3.6.1: the boundary block uses lMem = 85 (not 147),
-        // i.e. the search/extract operates on the last 85 entries of the
-        // 147-sample codebook memory.
-        let boundary_mem = &self.cb_mem[CB_LMEM - 85..];
         let boundary_full = construct_excitation_veclen(
-            boundary_mem,
+            &boundary_mem[CB_LMEM - stmeml..],
             boundary_samples,
             &fp.boundary.cb_idx,
             &fp.boundary.gain_idx,
         );
-        // For consistency with the prior behaviour (which seeded a full
-        // SUBL excitation into the CB memory after the boundary block),
-        // we expand the boundary excitation to a SUBL-sized vector by
-        // zero-padding.
-        let boundary_exc: [f32; SUBL] = {
-            let mut arr = [0.0f32; SUBL];
-            let copy = boundary_full.len().min(SUBL);
-            arr[..copy].copy_from_slice(&boundary_full[..copy]);
-            arr
-        };
-        // Copy the (already partially populated) state vector into the
-        // first two sub-blocks of excitation, then drop the boundary
-        // CB samples into their position-selected slot.
-        excitation[0..STATE_LEN].copy_from_slice(&state_vec[..STATE_LEN]);
-        for (i, &sample) in boundary_exc
-            .iter()
-            .take(boundary_samples.min(SUBL))
-            .enumerate()
-        {
-            let dst = boundary_offset + i;
-            if dst < excitation.len() {
-                excitation[dst] += sample;
+        if fp.position == 1 {
+            for (k, &v) in boundary_full.iter().take(boundary_samples).enumerate() {
+                decresidual[boundary_pos + k] = v;
+            }
+        } else {
+            // Reverse-time write back into the leading boundary slot.
+            for (k, &v) in boundary_full.iter().take(boundary_samples).enumerate() {
+                decresidual[start_pos - 1 - k] = v;
             }
         }
-        update_cb_memory(&mut self.cb_mem, &boundary_exc);
-        // Remaining `cb_sub_blocks()` sub-blocks (2 for 20ms, 4 for
-        // 30ms) use the packet's per-sub-block CB indices.
+        // ---- Forward + backward CB sub-block decode ----
         let n_cb_sub = fp.mode.cb_sub_blocks();
-        for cb_i in 0..n_cb_sub {
-            let pkt_sb = &fp.sub_blocks[cb_i];
-            let e = construct_excitation(&self.cb_mem, &pkt_sb.cb_idx, &pkt_sb.gain_idx);
-            let sb = 2 + cb_i;
-            if sb < n_sub {
-                excitation[sb * SUBL..(sb + 1) * SUBL].copy_from_slice(&e);
+        let n_for = n_sub.saturating_sub(start + 1);
+        let n_back = start.saturating_sub(1);
+        debug_assert_eq!(n_for + n_back, n_cb_sub);
+        let mut sub_idx = 0usize;
+
+        // Forward pass: cb_mem seeded with the full 80-sample state span.
+        if n_for > 0 {
+            let mut mem = [0.0f32; CB_LMEM];
+            mem[CB_LMEM - STATE_LEN..].copy_from_slice(&decresidual[span_lo..span_lo + STATE_LEN]);
+            for fb in 0..n_for {
+                let pkt_sb = &fp.sub_blocks[sub_idx];
+                let e = construct_excitation(&mem, &pkt_sb.cb_idx, &pkt_sb.gain_idx);
+                let sb = start + 1 + fb;
+                let lo = sb * SUBL;
+                if sb < n_sub {
+                    decresidual[lo..lo + SUBL].copy_from_slice(&e);
+                }
+                update_cb_memory(&mut mem, &e);
+                sub_idx += 1;
             }
-            update_cb_memory(&mut self.cb_mem, &e);
         }
+
+        // Backward pass: cb_mem seeded with the time-reversed tail of
+        // the decoded state span (and, in the reference, the forward
+        // sub-blocks just decoded — but we follow the reference's
+        // simplified seeding which only reads the state span itself).
+        if n_back > 0 {
+            let meml_gotten = (SUBL * (n_sub + 1 - start)).min(CB_LMEM);
+            let mut mem = [0.0f32; CB_LMEM];
+            for k in 0..meml_gotten {
+                mem[CB_LMEM - 1 - k] = decresidual[span_lo + k];
+            }
+            for bf in 0..n_back {
+                let pkt_sb = &fp.sub_blocks[sub_idx];
+                let e = construct_excitation(&mem, &pkt_sb.cb_idx, &pkt_sb.gain_idx);
+                // Write reverse-time back into decresidual.
+                for (k, &v) in e.iter().enumerate().take(SUBL) {
+                    let dst = span_lo - 1 - bf * SUBL - k;
+                    decresidual[dst] = v;
+                }
+                update_cb_memory(&mut mem, &e);
+                sub_idx += 1;
+            }
+        }
+
+        // The struct's `cb_mem` is now stale per-frame; we keep it on
+        // the struct for backward compatibility (other code paths may
+        // read it) but it is no longer the source of truth — each
+        // frame's CB walks operate on a freshly-seeded local memory.
+        // Reset to zero so any stray reader sees a defined state.
+        self.cb_mem = [0.0; CB_LMEM];
+
+        let excitation = decresidual;
 
         // §4.6 enhancer: smooth the residual using the pitch-
         // synchronous sequences over the last 640 samples (see the
