@@ -69,12 +69,12 @@ fn round_trip(mode: FrameMode, pcm: &[i16]) -> Vec<i16> {
         options = options.set("frame_ms", "30");
     }
     enc_params.options = options;
-    let mut enc: Box<dyn Encoder> = reg.make_encoder(&enc_params).expect("encoder");
+    let mut enc: Box<dyn Encoder> = reg.first_encoder(&enc_params).expect("encoder");
 
     let mut dec_params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
     dec_params.sample_rate = Some(SAMPLE_RATE);
     dec_params.channels = Some(1);
-    let mut dec = reg.make_decoder(&dec_params).expect("decoder");
+    let mut dec = reg.first_decoder(&dec_params).expect("decoder");
 
     enc.send_frame(&pcm_to_audio_frame(pcm)).unwrap();
     enc.flush().unwrap();

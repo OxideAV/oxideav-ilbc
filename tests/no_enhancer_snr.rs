@@ -162,7 +162,7 @@ fn round_trip_no_enh(mode: FrameMode, pcm: &[i16]) -> Vec<i16> {
         options = options.set("frame_ms", "30");
     }
     enc_params.options = options;
-    let mut enc: Box<dyn Encoder> = reg.make_encoder(&enc_params).expect("encoder");
+    let mut enc: Box<dyn Encoder> = reg.first_encoder(&enc_params).expect("encoder");
 
     let mut dec = BypassDecoder::new();
     enc.send_frame(&pcm_to_audio_frame(pcm)).unwrap();

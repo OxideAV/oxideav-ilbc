@@ -30,7 +30,7 @@ fn make_dec() -> Box<dyn oxideav_core::Decoder> {
     params.sample_rate = Some(oxideav_ilbc::SAMPLE_RATE);
     params.channels = Some(1);
     params.sample_format = Some(SampleFormat::S16);
-    reg.make_decoder(&params).expect("decoder")
+    reg.first_decoder(&params).expect("decoder")
 }
 
 fn decode_stream(packets: &[Vec<u8>]) -> Vec<i16> {

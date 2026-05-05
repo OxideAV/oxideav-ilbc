@@ -49,7 +49,7 @@ fn build_encoder(mode: FrameMode) -> Box<dyn Encoder> {
         options = options.set("frame_ms", "30");
     }
     enc_params.options = options;
-    reg.make_encoder(&enc_params).expect("encoder")
+    reg.first_encoder(&enc_params).expect("encoder")
 }
 
 #[test]
@@ -171,12 +171,12 @@ fn round_trip_voiced_onset_frame() {
     enc_params.sample_rate = Some(SAMPLE_RATE);
     enc_params.channels = Some(1);
     enc_params.sample_format = Some(SampleFormat::S16);
-    let mut enc = reg.make_encoder(&enc_params).expect("encoder");
+    let mut enc = reg.first_encoder(&enc_params).expect("encoder");
 
     let mut dec_params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
     dec_params.sample_rate = Some(SAMPLE_RATE);
     dec_params.channels = Some(1);
-    let mut dec = reg.make_decoder(&dec_params).expect("decoder");
+    let mut dec = reg.first_decoder(&dec_params).expect("decoder");
 
     enc.send_frame(&pcm_to_audio_frame(&pcm)).unwrap();
     enc.flush().unwrap();
@@ -230,12 +230,12 @@ fn round_trip_late_onset_exercises_variable_start_idx() {
     enc_params.sample_rate = Some(SAMPLE_RATE);
     enc_params.channels = Some(1);
     enc_params.sample_format = Some(SampleFormat::S16);
-    let mut enc = reg.make_encoder(&enc_params).expect("encoder");
+    let mut enc = reg.first_encoder(&enc_params).expect("encoder");
 
     let mut dec_params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
     dec_params.sample_rate = Some(SAMPLE_RATE);
     dec_params.channels = Some(1);
-    let mut dec = reg.make_decoder(&dec_params).expect("decoder");
+    let mut dec = reg.first_decoder(&dec_params).expect("decoder");
 
     enc.send_frame(&pcm_to_audio_frame(&pcm)).unwrap();
     enc.flush().unwrap();
