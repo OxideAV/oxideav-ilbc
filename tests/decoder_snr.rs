@@ -25,7 +25,7 @@ use oxideav_core::{CodecId, CodecParameters, Frame, Packet, SampleFormat, TimeBa
 
 fn make_dec() -> Box<dyn oxideav_core::Decoder> {
     let mut reg = CodecRegistry::new();
-    oxideav_ilbc::register(&mut reg);
+    oxideav_ilbc::register_codecs(&mut reg);
     let mut params = CodecParameters::audio(CodecId::new(oxideav_ilbc::CODEC_ID_STR));
     params.sample_rate = Some(oxideav_ilbc::SAMPLE_RATE);
     params.channels = Some(1);

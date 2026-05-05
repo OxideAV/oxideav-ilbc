@@ -39,7 +39,7 @@ fn pcm_to_audio_frame(pcm: &[i16]) -> Frame {
 
 fn build_encoder(mode: FrameMode) -> Box<dyn Encoder> {
     let mut reg = CodecRegistry::new();
-    oxideav_ilbc::register(&mut reg);
+    oxideav_ilbc::register_codecs(&mut reg);
     let mut enc_params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
     enc_params.sample_rate = Some(SAMPLE_RATE);
     enc_params.channels = Some(1);
@@ -165,7 +165,7 @@ fn round_trip_voiced_onset_frame() {
         *s = v.round().clamp(-32768.0, 32767.0) as i16;
     }
     let mut reg = CodecRegistry::new();
-    oxideav_ilbc::register(&mut reg);
+    oxideav_ilbc::register_codecs(&mut reg);
 
     let mut enc_params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
     enc_params.sample_rate = Some(SAMPLE_RATE);
@@ -225,7 +225,7 @@ fn round_trip_late_onset_exercises_variable_start_idx() {
     }
 
     let mut reg = CodecRegistry::new();
-    oxideav_ilbc::register(&mut reg);
+    oxideav_ilbc::register_codecs(&mut reg);
     let mut enc_params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
     enc_params.sample_rate = Some(SAMPLE_RATE);
     enc_params.channels = Some(1);

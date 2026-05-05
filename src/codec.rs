@@ -10,7 +10,7 @@ use oxideav_core::{CodecInfo, CodecRegistry, Decoder, Encoder};
 use crate::{CODEC_ID_STR, SAMPLE_RATE};
 
 /// Register the iLBC codec on `reg` with both decoder and encoder.
-pub fn register(reg: &mut CodecRegistry) {
+pub fn register_codecs(reg: &mut CodecRegistry) {
     let caps = CodecCapabilities::audio("ilbc_sw")
         .with_lossy(true)
         .with_intra_only(false)

@@ -68,7 +68,7 @@ fn pcm_to_audio_frame(pcm: &[i16]) -> Frame {
 
 fn round_trip(mode: FrameMode, hp: bool, pcm: &[i16]) -> Vec<i16> {
     let mut reg = CodecRegistry::new();
-    oxideav_ilbc::register(&mut reg);
+    oxideav_ilbc::register_codecs(&mut reg);
 
     let mut enc_params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
     enc_params.sample_rate = Some(SAMPLE_RATE);
