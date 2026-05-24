@@ -99,11 +99,18 @@ Flagged explicitly in each module where they apply:
   subsets sufficient to produce a monotone-LSF / bounded-output
   decoder on all index values. See `lsf_tables.rs` and
   `cb_tables.rs` module docs for the exact coverage.
-- The state encoder uses a direct scalar quantiser rather than the
-  full §3.5.3 DPCM noise-shaping loop with the perceptual weighting
-  filter; the codebook search runs on unweighted residuals (RFC §3.4
-  describes the 0.4222-chirped weighting filter as RECOMMENDED, not
-  REQUIRED).
+- The §3.5.3 DPCM noise-shaping start-state quantiser (Appendix A.46
+  `AbsQuantW`, perceptual weighting via `Ak(z/0.4222)`) is implemented
+  but **off by default** (`state_dpcm=on` to enable). Like the §3.6.2
+  codebook-search weighting, the perceptual weighting regresses
+  waveform SNR on the synthetic self-roundtrip signals, so the default
+  path uses a direct per-sample scalar quantiser on the unweighted
+  scaled residual. Both paths emit `state_sq3Tbl` indices that the
+  decoder reads back identically (RFC §4.2 / Appendix A.44
+  `StateConstructW` applies no inverse weighting), so the toggle never
+  affects decode semantics. The codebook search also runs on unweighted
+  residuals (RFC §3.4 describes the 0.4222-chirped weighting filter as
+  RECOMMENDED, not REQUIRED).
 - The §4.6 enhancer constraint `b` is set to 0.005 instead of the
   RFC-suggested 0.05. The RFC value tunes the enhancer for perceptual
   smoothing of voiced-region pitch periodicity at the cost of
@@ -142,7 +149,7 @@ pipeline that we have not stood up.
 | §3.5 scalar start-state coding (3-bit shape + 6-bit log scale) | full |
 | §3.5.1 `block_class` (variable `start_idx` via FrameClassify) | full (round 23 — windowed energy classifier from Appendix A.20) |
 | §3.5.1 `position` bit | full (RFC §3.5.1 `en1 vs en2` test + 4× IIR-error-propagation guard) |
-| §3.5.3 perceptual-DPCM noise-shaping loop | direct scalar quantiser substitute |
+| §3.5.3 perceptual-DPCM noise-shaping loop (`AbsQuantW`) | implemented (`state_dpcm=on`); direct scalar quantiser is the SNR-preserving default |
 | §3.6 multistage CB search (boundary 22/23 + 40-sample sub-blocks, symmetric forward + backward walk) | full with Table 3.1/3.2 caps |
 | §3.6.2 perceptual weighting (`Wk(z)=1/Ak(z/0.4222)`) | implemented but disabled (round-21 sweep — regresses synthetic SNR) |
 | §3.7 stage-0 gain-correction post-pass | full |

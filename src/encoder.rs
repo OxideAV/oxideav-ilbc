@@ -197,6 +197,23 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         .map(|v| matches!(v, "1" | "on" | "true" | "yes"))
         .unwrap_or(false);
 
+    // RFC 3951 §3.5.3 / Appendix A.46 `AbsQuantW`: the start-state
+    // samples are quantised by a predictive noise-shaping DPCM loop in
+    // the perceptually-weighted speech domain. The RFC weighting is
+    // RECOMMENDED, not REQUIRED, and (like the §3.6.2 codebook-search
+    // weighting) it regresses waveform SNR on the synthetic
+    // self-roundtrip signals, so it is OFF by default; the encoder then
+    // uses a direct per-sample scalar quantiser on the unweighted scaled
+    // residual. Enable the spec-faithful DPCM path with `state_dpcm=on`.
+    // Both paths emit the same kind of `state_sq3Tbl` indices and decode
+    // identically (the decoder applies no inverse weighting — RFC §4.2 /
+    // Appendix A.44 `StateConstructW`).
+    let state_dpcm_on = params
+        .options
+        .get("state_dpcm")
+        .map(|v| matches!(v, "1" | "on" | "true" | "yes"))
+        .unwrap_or(false);
+
     let mut output = params.clone();
     output.media_type = MediaType::Audio;
     output.sample_format = Some(SampleFormat::S16);
@@ -207,7 +224,12 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         FrameMode::Ms30 => 13_333,
     });
 
-    Ok(Box::new(IlbcEncoder::new(mode, output, hp_filter_on)))
+    Ok(Box::new(IlbcEncoder::new(
+        mode,
+        output,
+        hp_filter_on,
+        state_dpcm_on,
+    )))
 }
 
 /// Internal encoder state.
@@ -241,13 +263,22 @@ struct IlbcEncoder {
     /// optional, gated on the application's input characteristics).
     hp_state: HpInputState,
     hp_filter_on: bool,
+    /// Use the RFC §3.5.3 / Appendix A.46 `AbsQuantW` predictive
+    /// noise-shaping DPCM quantiser for the start state (perceptually
+    /// weighted). Off by default — see `make_encoder` for the rationale.
+    state_dpcm_on: bool,
     pending: VecDeque<Packet>,
     sample_pos: i64,
     eof: bool,
 }
 
 impl IlbcEncoder {
-    fn new(mode: FrameMode, output_params: CodecParameters, hp_filter_on: bool) -> Self {
+    fn new(
+        mode: FrameMode,
+        output_params: CodecParameters,
+        hp_filter_on: bool,
+        state_dpcm_on: bool,
+    ) -> Self {
         let lookback = vec![0.0f32; lookback_len(mode)];
         // Identity LPC for the very first frame's enhancer-delay shift —
         // matches the decoder's seeding (decoder.rs:81).
@@ -264,6 +295,7 @@ impl IlbcEncoder {
             old_a_per_sub: vec![identity; 6],
             hp_state: HpInputState::default(),
             hp_filter_on,
+            state_dpcm_on,
             pending: VecDeque::new(),
             sample_pos: 0,
             eof: false,
@@ -433,10 +465,30 @@ impl IlbcEncoder {
         let scale_idx = crate::state_encode::quantise_scale(&ccres);
         let qmax = crate::state::STATE_FRGQ_TBL[scale_idx as usize];
         let scal = 4.5 / 10f32.powf(qmax);
-        let state_samples: Vec<u8> = ccres
-            .iter()
-            .map(|&v| crate::state_encode::quantise_shape_sample(v * scal))
-            .collect();
+        let scaled: Vec<f32> = ccres.iter().map(|&v| v * scal).collect();
+        // Start-state shape quantisation. RFC §3.5.3 / Appendix A.46
+        // `AbsQuantW` specifies a predictive noise-shaping DPCM loop in
+        // the perceptually-weighted domain; we wire it behind
+        // `state_dpcm_on` (off by default — like the §3.6.2 CB weighting,
+        // the perceptual weighting regresses synthetic self-roundtrip
+        // SNR). The weighting denominators are the chirp-0.4222-expanded
+        // LPC of the two sub-blocks straddling the start state (sub-block
+        // `start-1` and `start`), matching the reference's
+        // `weightdenum[(start-1)..]` pointer that advances one sub-block
+        // at the slot boundary. Both paths emit `state_sq3Tbl` indices
+        // that the decoder reads straight through (no inverse weighting,
+        // RFC §4.2 / Appendix A.44), so the choice never affects decode
+        // semantics — only which indices we emit.
+        let state_samples: Vec<u8> = if self.state_dpcm_on {
+            let wd_first = crate::state_encode::weight_denum_pub(&a_per_sub[start - 1]);
+            let wd_second = crate::state_encode::weight_denum_pub(&a_per_sub[start]);
+            crate::state_encode::abs_quant_w(&scaled, &wd_first, &wd_second, position == 1)
+        } else {
+            scaled
+                .iter()
+                .map(|&v| crate::state_encode::quantise_shape_sample(v))
+                .collect()
+        };
 
         // The reconstructed scalar state the decoder will produce.
         let scalar_state =
@@ -844,5 +896,64 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 2);
+    }
+
+    /// RFC §3.5.3 / Appendix A.46 `AbsQuantW` path: enabling
+    /// `state_dpcm=on` runs the predictive noise-shaping DPCM quantiser
+    /// for the start state. It must still emit well-formed 38-byte
+    /// packets and produce bounded PCM through the decoder.
+    #[test]
+    fn encoder_state_dpcm_path_round_trips() {
+        let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
+        params.sample_rate = Some(SAMPLE_RATE);
+        params.channels = Some(1);
+        params.sample_format = Some(SampleFormat::S16);
+        params.options = params.options.set("state_dpcm", "on");
+        let mut enc = make_encoder(&params).expect("encoder");
+
+        // 6 frames of a voiced-ish chord so the start-state slot is
+        // non-trivial (the DPCM loop is a no-op on silence).
+        let n = 6 * 160;
+        let mut bytes = Vec::with_capacity(n * 2);
+        for i in 0..n {
+            let t = i as f32 / SAMPLE_RATE as f32;
+            let mut v = 0.0f32;
+            for h in 1..4 {
+                v += (2.0 * core::f32::consts::PI * (h as f32) * 150.0 * t).sin()
+                    * (4000.0 / h as f32);
+            }
+            let s = v.round().clamp(-32768.0, 32767.0) as i16;
+            bytes.extend_from_slice(&s.to_le_bytes());
+        }
+        let af = AudioFrame {
+            samples: n as u32,
+            pts: Some(0),
+            data: vec![bytes],
+        };
+        enc.send_frame(&Frame::Audio(af)).unwrap();
+        enc.flush().unwrap();
+
+        let mut dec_params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
+        dec_params.sample_rate = Some(SAMPLE_RATE);
+        dec_params.channels = Some(1);
+        let mut dec = crate::decoder::make_decoder(&dec_params).expect("decoder");
+
+        let mut produced = 0usize;
+        let mut decoded = 0usize;
+        while let Ok(pkt) = enc.receive_packet() {
+            assert_eq!(pkt.data.len(), 38);
+            produced += 1;
+            let dpkt = Packet::new(0, TimeBase::new(1, SAMPLE_RATE as i64), pkt.data.clone());
+            dec.send_packet(&dpkt).unwrap();
+            if let Frame::Audio(a) = dec.receive_frame().unwrap() {
+                for chunk in a.data[0].chunks_exact(2) {
+                    let s = i16::from_le_bytes([chunk[0], chunk[1]]);
+                    assert!(s.abs() as i32 <= 32767, "sample out of range: {s}");
+                    decoded += 1;
+                }
+            }
+        }
+        assert_eq!(produced, 6, "expected 6 encoded packets");
+        assert_eq!(decoded, 6 * 160, "decoder produced unexpected sample count");
     }
 }

@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (round 123 — RFC §3.5.3 / Appendix A.46 `AbsQuantW` start-state DPCM)
+
+- `state_encode::abs_quant_w`: the RFC 3951 §3.5.3 predictive
+  noise-shaping DPCM quantiser for the start state, in the
+  perceptually-weighted speech domain (Figure 3.3). The scaled all-pass
+  output is filtered through `Wk(z) = 1/Ak(z/0.4222)` to form weighted
+  speech, then a sample-by-sample loop predicts `y[n]` via `Pk(z) =
+  1 - 1/Wk(z)`, quantises `d[n] = x[n] - y[n]` against `state_sq3Tbl`,
+  and feeds the chosen value back through `Wk(z)`. Mirrors the embedded
+  reference `AbsQuantW` (Appendix A.46) including the sub-block
+  weighting-denominator switch at the slot boundary (`n == SUBL` for
+  `state_first`, else `n == state_short_len - SUBL`).
+- `state_encode::weight_denum_pub`: builds the bandwidth-expanded
+  weighting denominator `Ak(z/0.4222)` from a sub-block LPC row.
+- Encoder gains a `state_dpcm` option (`on`/`1`/`true`/`yes`). When set,
+  the start-state shape indices come from `abs_quant_w`; otherwise the
+  default direct per-sample scalar quantiser is used. The DPCM path is
+  off by default: like the §3.6.2 codebook-search weighting, the
+  perceptual weighting regresses synthetic self-roundtrip SNR (sine 20
+  ms 23.9→23.2, sine 30 ms 28.6→26.7, voiced 20 ms 25.0→22.8, voiced
+  30 ms 27.1→24.4 dB). RFC §3.4 describes the weighting as RECOMMENDED,
+  not REQUIRED. Both paths emit `state_sq3Tbl` indices that the decoder
+  reads back identically (RFC §4.2 / Appendix A.44 `StateConstructW`
+  applies no inverse weighting), so the toggle never changes decode
+  semantics — only which indices are emitted.
+- This closes the long-standing structural §3.5.3 deviation: the DPCM
+  noise-shaping loop is now present (gated), where previously only the
+  direct scalar quantiser existed.
+- Tests: 5 new (`weight_denum_chirps_by_0_4222`,
+  `abs_quant_w_identity_weight_matches_direct`,
+  `abs_quant_w_produces_valid_indices`,
+  `abs_quant_w_noise_shaping_lowers_weighted_error` in
+  `state_encode.rs`; `encoder_state_dpcm_path_round_trips` in
+  `encoder.rs`). The default-path round-trip SNR floors are unchanged
+  (the direct quantiser is bit-identical to before — it now operates on
+  the pre-scaled residual instead of multiplying per sample).
+
 ## [0.0.5](https://github.com/OxideAV/oxideav-ilbc/compare/v0.0.4...v0.0.5) - 2026-05-06
 
 ### Other

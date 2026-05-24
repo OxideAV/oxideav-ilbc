@@ -19,9 +19,13 @@
 //!    one to the nearest entry of `state_sq3Tbl` (3 bits). These are
 //!    the `state_samples` indices.
 //!
-//! The perceptual DPCM loop of §3.5.3 is intentionally simplified to a
-//! direct scalar quantiser — the RFC calls the weighting OPTIONAL, and
-//! the decoder's reconstruction ignores it (see `crate::state`).
+//! The §3.5.3 perceptual DPCM noise-shaping loop is implemented in
+//! [`abs_quant_w`] (Appendix A.46 `AbsQuantW`) but the encoder uses it
+//! only when `state_dpcm=on`; the default is the direct scalar quantiser
+//! above. The RFC calls the weighting RECOMMENDED, not REQUIRED, and the
+//! decoder's reconstruction ignores it either way (see `crate::state` /
+//! Appendix A.44 `StateConstructW`), so both quantisers emit `state_sq3Tbl`
+//! indices that decode identically.
 
 use crate::state::{STATE_FRGQ_TBL, STATE_SQ3_TBL};
 use crate::{FrameMode, LPC_ORDER, SUBL};
@@ -182,6 +186,131 @@ pub fn quantise_shape_sample(x: f32) -> u8 {
     best
 }
 
+/// Perceptual-weighting chirp factor `Wk(z) = 1/Ak(z/0.4222)`.
+///
+/// RFC 3951 §3.4 (line 820): `LPC_CHIRP_WEIGHTDENUM = 0.4222`. The same
+/// constant drives the codebook-search weighting filter in
+/// [`crate::cb_search`].
+const LPC_CHIRP_WEIGHTDENUM: f32 = 0.4222;
+
+/// Build the bandwidth-expanded weighting denominator `weightDenum =
+/// Ak(z / 0.4222)` from a sub-block LPC polynomial `[1, a1..a10]`.
+pub fn weight_denum_pub(a: &[f32; LPC_ORDER + 1]) -> [f32; LPC_ORDER + 1] {
+    weight_denum(a)
+}
+
+/// Build the bandwidth-expanded weighting denominator `weightDenum =
+/// Ak(z / 0.4222)` from a sub-block LPC polynomial `[1, a1..a10]`.
+fn weight_denum(a: &[f32; LPC_ORDER + 1]) -> [f32; LPC_ORDER + 1] {
+    let mut wd = *a;
+    let mut c = 1.0f32;
+    for w in wd.iter_mut() {
+        *w *= c;
+        c *= LPC_CHIRP_WEIGHTDENUM;
+    }
+    wd
+}
+
+/// Predictive noise-shaping DPCM quantiser of the scaled start state —
+/// RFC 3951 §3.5.3 / Appendix A.46 `AbsQuantW`.
+///
+/// `scaled` is the scaled all-pass output `fout * scal` (length
+/// `state_short_len`). `wd_first` / `wd_second` are the bandwidth-
+/// expanded weighting denominators (`Ak(z/0.4222)`) of the two
+/// sub-blocks straddling the start state — `wd_first` is sub-block
+/// `start-1`, `wd_second` is sub-block `start`. `state_first` is the
+/// position bit (1 ⇒ scalar slot is leading, 0 ⇒ trailing).
+///
+/// The reference filters the input through the weighting filter `Wk(z)`
+/// to form the weighted-speech samples `x[n]`, then runs the sample-by-
+/// sample DPCM loop of Figure 3.3: predict `y[n]` via `Pk(z) =
+/// 1 - 1/Wk(z)`, quantise `d[n] = x[n] - y[n]` with the 3-bit
+/// `state_sq3Tbl`, and feed the chosen value back through `Wk(z)` so the
+/// prediction memory tracks the quantised reconstruction.
+///
+/// The decoder ([`crate::state::reconstruct_scalar_state`]) reads the
+/// chosen indices back through `state_sq3Tbl` directly — no inverse
+/// weighting is applied at decode time, so this routine is a drop-in,
+/// decoder-compatible replacement for the per-sample nearest-neighbour
+/// quantiser: it only changes which indices we emit, not how they are
+/// interpreted.
+///
+/// `state_first` selects where the weighting filter switches from the
+/// first sub-block's coefficients to the second (RFC reference advances
+/// `weightDenum` at `n == SUBL` for `state_first`, else at `n ==
+/// state_short_len - SUBL`).
+pub fn abs_quant_w(
+    scaled: &[f32],
+    wd_first: &[f32; LPC_ORDER + 1],
+    wd_second: &[f32; LPC_ORDER + 1],
+    state_first: bool,
+) -> Vec<u8> {
+    let len = scaled.len();
+    // Weighted-speech buffer `x[n]` — the input filtered through Wk(z) =
+    // 1/weightDenum, with the coefficient switch at the sub-block edge.
+    let split = if state_first {
+        SUBL.min(len)
+    } else {
+        len.saturating_sub(SUBL)
+    };
+    let mut x = scaled.to_vec();
+    all_pole_in_place(&mut x[..split], wd_first);
+    all_pole_in_place(&mut x[split..], wd_second);
+
+    // DPCM loop in the weighted-speech domain (Figure 3.3). `synt_out`
+    // holds the Wk(z)-synthesised quantised values; `synt_mem[k]` is the
+    // value `k+1` samples back (most recent at index 0).
+    let mut out = vec![0u8; len];
+    let mut synt_mem = [0.0f32; LPC_ORDER];
+    for n in 0..len {
+        // Pick the active weighting denominator for this sample.
+        let wd = if (state_first && n < SUBL) || (!state_first && n < split) {
+            wd_first
+        } else {
+            wd_second
+        };
+        // Prediction y[n] = -Σ wd[k]·synt_out[n-k] (AllPole on a zero
+        // input sample): `synt_out[n] = 0` then AllPoleFilter(1).
+        let mut y = 0.0f32;
+        for k in 1..=LPC_ORDER {
+            y -= wd[k] * synt_mem[k - 1];
+        }
+        // Target d[n] = x[n] - y[n], quantise with state_sq3Tbl.
+        let to_q = x[n] - y;
+        let idx = quantise_shape_sample(to_q);
+        out[n] = idx;
+        // Reconstruct synt_out[n] = u[n] - Σ wd[k]·synt_out[n-k] (second
+        // AllPoleFilter pass — feeds Wk(z) with the chosen value).
+        let mut synt = STATE_SQ3_TBL[idx as usize];
+        for k in 1..=LPC_ORDER {
+            synt -= wd[k] * synt_mem[k - 1];
+        }
+        // Shift filter memory: newest at index 0.
+        for k in (1..LPC_ORDER).rev() {
+            synt_mem[k] = synt_mem[k - 1];
+        }
+        synt_mem[0] = synt;
+    }
+    out
+}
+
+/// In-place all-pole filter `1/Coef` (RFC 3951 Appendix A.30
+/// `AllPoleFilter`) with zero initial state. `coef[0]` is assumed 1.0.
+fn all_pole_in_place(buf: &mut [f32], coef: &[f32; LPC_ORDER + 1]) {
+    let mut mem = [0.0f32; LPC_ORDER];
+    for x in buf.iter_mut() {
+        let mut s = *x;
+        for k in 1..=LPC_ORDER {
+            s -= coef[k] * mem[k - 1];
+        }
+        *x = s;
+        for k in (1..LPC_ORDER).rev() {
+            mem[k] = mem[k - 1];
+        }
+        mem[0] = s;
+    }
+}
+
 /// Output of the start-state encoder.
 #[derive(Clone, Debug)]
 pub struct StateEncodeResult {
@@ -305,5 +434,106 @@ mod tests {
         for (got, expected) in out.iter().zip(input.iter()) {
             assert_eq!(got, expected);
         }
+    }
+
+    #[test]
+    fn weight_denum_chirps_by_0_4222() {
+        // Ak(z/0.4222): a[i] *= 0.4222^i. a[0] is untouched (×1).
+        let mut a = [0.0f32; LPC_ORDER + 1];
+        a[0] = 1.0;
+        a[1] = 0.5;
+        a[2] = -0.25;
+        let wd = weight_denum_pub(&a);
+        assert_eq!(wd[0], 1.0);
+        assert!((wd[1] - 0.5 * 0.4222).abs() < 1e-7);
+        assert!((wd[2] - (-0.25) * 0.4222 * 0.4222).abs() < 1e-7);
+    }
+
+    #[test]
+    fn abs_quant_w_identity_weight_matches_direct() {
+        // With an identity weighting filter (Wk(z) = 1, all chirped
+        // coeffs zero), Pk(z) = 1 - 1/Wk(z) = 0: no prediction, no
+        // pre-filtering. AbsQuantW then degenerates to the per-sample
+        // nearest-neighbour quantiser, so its indices must match the
+        // direct `quantise_shape_sample` path bit-for-bit. RFC 3951
+        // Figure 3.3 with a flat weighting filter.
+        let mut id = [0.0f32; LPC_ORDER + 1];
+        id[0] = 1.0;
+        let scaled: Vec<f32> = (0..57)
+            .map(|i| ((i as f32) * 0.21).sin() * 3.0 - 0.4)
+            .collect();
+        for &state_first in &[true, false] {
+            let dpcm = abs_quant_w(&scaled, &id, &id, state_first);
+            let direct: Vec<u8> = scaled.iter().map(|&v| quantise_shape_sample(v)).collect();
+            assert_eq!(dpcm, direct, "state_first={state_first}");
+        }
+    }
+
+    #[test]
+    fn abs_quant_w_produces_valid_indices() {
+        // Non-trivial weighting filter: every emitted index must be a
+        // valid 3-bit state_sq3Tbl index (0..8). Length = 30 ms state.
+        let mut a = [0.0f32; LPC_ORDER + 1];
+        a[0] = 1.0;
+        a[1] = -0.6;
+        a[2] = 0.18;
+        a[3] = -0.04;
+        let wd = weight_denum_pub(&a);
+        let scaled: Vec<f32> = (0..58).map(|i| ((i as f32) * 0.37).cos() * 2.5).collect();
+        for &state_first in &[true, false] {
+            let out = abs_quant_w(&scaled, &wd, &wd, state_first);
+            assert_eq!(out.len(), 58);
+            for &idx in &out {
+                assert!(idx < 8, "index out of 3-bit range: {idx}");
+            }
+        }
+    }
+
+    #[test]
+    fn abs_quant_w_noise_shaping_lowers_weighted_error() {
+        // The DPCM loop shapes quantisation noise so the weighted-domain
+        // reconstruction tracks the weighted-domain target better than
+        // an open-loop per-sample quantiser would. We verify the loop
+        // actually closes: feed a ramp through a real weighting filter
+        // and check the reconstructed weighted signal has lower total
+        // squared error against the weighted target than the open-loop
+        // (no-feedback) quantiser. RFC 3951 §3.5.3.
+        let mut a = [0.0f32; LPC_ORDER + 1];
+        a[0] = 1.0;
+        a[1] = -0.9;
+        a[2] = 0.4;
+        let wd = weight_denum_pub(&a);
+        let scaled: Vec<f32> = (0..57).map(|i| (i as f32 - 28.0) * 0.12).collect();
+
+        // Weighted target x[n] (the same pre-filtering AbsQuantW does).
+        let mut x = scaled.clone();
+        all_pole_in_place(&mut x, &wd);
+
+        // Closed-loop indices.
+        let idx_cl = abs_quant_w(&scaled, &wd, &wd, true);
+        // Reconstruct the closed-loop weighted signal: synthesise the
+        // chosen sq3 values through Wk(z) = 1/wd.
+        let mut recon_cl: Vec<f32> = idx_cl.iter().map(|&i| STATE_SQ3_TBL[i as usize]).collect();
+        all_pole_in_place(&mut recon_cl, &wd);
+
+        // Open-loop indices: per-sample NN on the weighted target.
+        let idx_ol: Vec<u8> = x.iter().map(|&v| quantise_shape_sample(v)).collect();
+        let mut recon_ol: Vec<f32> = idx_ol.iter().map(|&i| STATE_SQ3_TBL[i as usize]).collect();
+        all_pole_in_place(&mut recon_ol, &wd);
+
+        let err_cl: f32 = x
+            .iter()
+            .zip(&recon_cl)
+            .map(|(&a, &b)| (a - b) * (a - b))
+            .sum();
+        let err_ol: f32 = x
+            .iter()
+            .zip(&recon_ol)
+            .map(|(&a, &b)| (a - b) * (a - b))
+            .sum();
+        assert!(
+            err_cl <= err_ol,
+            "closed-loop weighted error {err_cl} should not exceed open-loop {err_ol}"
+        );
     }
 }
