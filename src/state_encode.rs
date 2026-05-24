@@ -248,14 +248,31 @@ pub fn abs_quant_w(
     let len = scaled.len();
     // Weighted-speech buffer `x[n]` — the input filtered through Wk(z) =
     // 1/weightDenum, with the coefficient switch at the sub-block edge.
+    // The reference filters `in` in place with a single AllPoleFilter
+    // state that runs continuously across the boundary (the second
+    // `AllPoleFilter(&in[split], ...)` call reads `in[split-1..]`, the
+    // already-filtered tail, as its initial filter memory), so we carry
+    // the filter memory across the denominator switch rather than
+    // resetting it.
     let split = if state_first {
         SUBL.min(len)
     } else {
         len.saturating_sub(SUBL)
     };
     let mut x = scaled.to_vec();
-    all_pole_in_place(&mut x[..split], wd_first);
-    all_pole_in_place(&mut x[split..], wd_second);
+    let mut wmem = [0.0f32; LPC_ORDER];
+    for (n, xn) in x.iter_mut().enumerate() {
+        let wd = if n < split { wd_first } else { wd_second };
+        let mut s = *xn;
+        for k in 1..=LPC_ORDER {
+            s -= wd[k] * wmem[k - 1];
+        }
+        *xn = s;
+        for k in (1..LPC_ORDER).rev() {
+            wmem[k] = wmem[k - 1];
+        }
+        wmem[0] = s;
+    }
 
     // DPCM loop in the weighted-speech domain (Figure 3.3). `synt_out`
     // holds the Wk(z)-synthesised quantised values; `synt_mem[k]` is the
@@ -263,12 +280,10 @@ pub fn abs_quant_w(
     let mut out = vec![0u8; len];
     let mut synt_mem = [0.0f32; LPC_ORDER];
     for n in 0..len {
-        // Pick the active weighting denominator for this sample.
-        let wd = if (state_first && n < SUBL) || (!state_first && n < split) {
-            wd_first
-        } else {
-            wd_second
-        };
+        // Pick the active weighting denominator for this sample — the
+        // reference advances `weightDenum` at `n == SUBL` (state_first)
+        // or `n == state_short_len - SUBL` (else), i.e. exactly `split`.
+        let wd = if n < split { wd_first } else { wd_second };
         // Prediction y[n] = -Σ wd[k]·synt_out[n-k] (AllPole on a zero
         // input sample): `synt_out[n] = 0` then AllPoleFilter(1).
         let mut y = 0.0f32;
@@ -296,6 +311,11 @@ pub fn abs_quant_w(
 
 /// In-place all-pole filter `1/Coef` (RFC 3951 Appendix A.30
 /// `AllPoleFilter`) with zero initial state. `coef[0]` is assumed 1.0.
+/// Used by the §3.5.3 tests to synthesise weighted-domain signals; the
+/// `abs_quant_w` filtering is inlined so its state can carry across the
+/// sub-block weighting-denominator switch (see the reference's single
+/// continuous `AllPoleFilter` run over `in`).
+#[cfg(test)]
 fn all_pole_in_place(buf: &mut [f32], coef: &[f32; LPC_ORDER + 1]) {
     let mut mem = [0.0f32; LPC_ORDER];
     for x in buf.iter_mut() {
