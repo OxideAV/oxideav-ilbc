@@ -18,10 +18,21 @@
 //! §4). Two independent decoders almost never produce bit-identical
 //! PCM: rounding in the LSF -> LPC conversion, the all-pass phase
 //! compensator (§4.2), the optional pitch-synchronous enhancer (§4.6),
-//! and the post-filter all introduce sub-LSB drift. We therefore start
-//! every fixture in [`Tier::ReportOnly`] and let CI surface the deltas
-//! without gating; tightening to a numeric PSNR floor is a follow-up
-//! once the residual divergences are catalogued.
+//! and the post-filter all introduce sub-LSB drift.
+//!
+//! ## Tiering (round 173)
+//!
+//! Through round 122 every fixture sat in [`Tier::ReportOnly`] while
+//! the per-fixture residuals were being catalogued. They are now
+//! catalogued (the eprintln line in this driver is the empirical
+//! catalogue), so each case carries a [`Tier::PsnrFloor`] regression
+//! floor anchored at the observed PSNR minus a 2-3 dB cross-platform
+//! safety margin. The margin absorbs sub-LSB float drift across linux
+//! / macOS / aarch64 / x86_64 CI runners (the dominant source of
+//! variance on a pure-Rust CELP path) while still failing CI if a
+//! future code change shifts the per-fixture floor by more than the
+//! margin. Tighten the floor in a follow-up round once a cross-runner
+//! span has been measured for a given fixture.
 //!
 //! The trace.txt files under each fixture dir are not consumed here;
 //! they are an aid for the human implementer when localising
@@ -282,7 +293,13 @@ enum Tier {
     /// (lossy) and two independent decoders typically differ at the
     /// sub-LSB level even on identical input — see the module-level
     /// comment.
+    #[allow(dead_code)] // Reserved for fixtures whose floor isn't yet pinned.
     ReportOnly,
+    /// Fail the test if the measured PSNR (full-scale int16) is below
+    /// the given threshold in dB. The floor is set 2-3 dB under the
+    /// empirically-observed PSNR so cross-runner float drift doesn't
+    /// red the CI on the per-fixture baseline.
+    PsnrFloor(f64),
 }
 
 struct CorpusCase {
@@ -375,13 +392,30 @@ fn evaluate(case: &CorpusCase) {
             // captures it. Tighten to a numeric floor in a follow-up.
             let _ = s.psnr_db();
         }
+        Tier::PsnrFloor(min_db) => {
+            let got = s.psnr_db();
+            assert!(
+                got >= min_db,
+                "{}: PSNR {:.2} dB fell below the regression floor {:.2} dB \
+                 (rms={:.2}, max|d|={}, exact={}/{})",
+                case.name,
+                got,
+                min_db,
+                s.rmse(),
+                s.max_abs_diff,
+                s.n_exact,
+                s.n,
+            );
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Per-fixture tests — 12 cases. iLBC is lossy, so every fixture starts
-// in Tier::ReportOnly. Tighten case-by-case in follow-ups once the
-// per-fixture PSNR floor is empirically established.
+// Per-fixture tests — 13 single-file cases below + 3 multi-view +
+// 2 mid-stream-transition tests = 16 total. iLBC is lossy, so each
+// fixture carries a Tier::PsnrFloor (round 173) anchored 2-3 dB
+// under the observed PSNR; tighten case-by-case in a follow-up once
+// a cross-runner span has been measured.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -391,7 +425,8 @@ fn corpus_mode_20ms_mono_1s_sine() {
         input_file: "input.lbc",
         expected_file: "expected.wav",
         carriage: Carriage::StorageFormat,
-        tier: Tier::ReportOnly,
+        // Baseline 15.95 dB.
+        tier: Tier::PsnrFloor(13.0),
     });
 }
 
@@ -402,7 +437,9 @@ fn corpus_mode_20ms_mono_1s_noise() {
         input_file: "input.lbc",
         expected_file: "expected.wav",
         carriage: Carriage::StorageFormat,
-        tier: Tier::ReportOnly,
+        // Baseline 11.99 dB. White noise is the hardest case (no
+        // pitch periodicity for the enhancer to lock onto).
+        tier: Tier::PsnrFloor(9.0),
     });
 }
 
@@ -413,7 +450,9 @@ fn corpus_mode_20ms_silence() {
         input_file: "input.lbc",
         expected_file: "expected.wav",
         carriage: Carriage::StorageFormat,
-        tier: Tier::ReportOnly,
+        // Baseline 74.67 dB — silence has nothing for the CELP search
+        // to chase, so this is the tightest floor we can pin.
+        tier: Tier::PsnrFloor(70.0),
     });
 }
 
@@ -424,7 +463,8 @@ fn corpus_mode_30ms_mono_1s_sine() {
         input_file: "input.lbc",
         expected_file: "expected.wav",
         carriage: Carriage::StorageFormat,
-        tier: Tier::ReportOnly,
+        // Baseline 15.91 dB.
+        tier: Tier::PsnrFloor(13.0),
     });
 }
 
@@ -435,7 +475,8 @@ fn corpus_mode_30ms_mono_1s_noise() {
         input_file: "input.lbc",
         expected_file: "expected.wav",
         carriage: Carriage::StorageFormat,
-        tier: Tier::ReportOnly,
+        // Baseline 12.80 dB.
+        tier: Tier::PsnrFloor(10.0),
     });
 }
 
@@ -446,7 +487,8 @@ fn corpus_mode_30ms_silence() {
         input_file: "input.lbc",
         expected_file: "expected.wav",
         carriage: Carriage::StorageFormat,
-        tier: Tier::ReportOnly,
+        // Baseline 74.03 dB — see mode-20ms-silence note.
+        tier: Tier::PsnrFloor(70.0),
     });
 }
 
@@ -457,7 +499,8 @@ fn corpus_mode_30ms_voice_like() {
         input_file: "input.lbc",
         expected_file: "expected.wav",
         carriage: Carriage::StorageFormat,
-        tier: Tier::ReportOnly,
+        // Baseline 18.97 dB.
+        tier: Tier::PsnrFloor(15.0),
     });
 }
 
@@ -468,7 +511,8 @@ fn corpus_mode_20ms_voice_like() {
         input_file: "input.lbc",
         expected_file: "expected.wav",
         carriage: Carriage::StorageFormat,
-        tier: Tier::ReportOnly,
+        // Baseline 15.78 dB.
+        tier: Tier::PsnrFloor(13.0),
     });
 }
 
@@ -479,7 +523,10 @@ fn corpus_mode_20ms_step_impulse() {
         input_file: "input.lbc",
         expected_file: "expected.wav",
         carriage: Carriage::StorageFormat,
-        tier: Tier::ReportOnly,
+        // Baseline 34.24 dB — long quiet tail between impulses lifts
+        // the average, so the floor sits well above the typical
+        // synthetic-tone case.
+        tier: Tier::PsnrFloor(30.0),
     });
 }
 
@@ -490,7 +537,8 @@ fn corpus_mode_20ms_dtmf_tones() {
         input_file: "input.lbc",
         expected_file: "expected.wav",
         carriage: Carriage::StorageFormat,
-        tier: Tier::ReportOnly,
+        // Baseline 17.34 dB.
+        tier: Tier::PsnrFloor(14.0),
     });
 }
 
@@ -508,7 +556,8 @@ fn corpus_containerless_storage_header() {
         input_file: "storage_header.lbc",
         expected_file: "expected.wav",
         carriage: Carriage::StorageFormat,
-        tier: Tier::ReportOnly,
+        // All three views of the same bitstream — baseline 13.63 dB.
+        tier: Tier::PsnrFloor(11.0),
     });
 }
 
@@ -519,7 +568,7 @@ fn corpus_containerless_raw_no_header() {
         input_file: "raw_no_header.bin",
         expected_file: "expected.wav",
         carriage: Carriage::Raw(FrameMode::Ms20),
-        tier: Tier::ReportOnly,
+        tier: Tier::PsnrFloor(11.0),
     });
 }
 
@@ -530,7 +579,7 @@ fn corpus_containerless_rtp_style() {
         input_file: "rtp_style.bin",
         expected_file: "expected.wav",
         carriage: Carriage::RtpStyle(FrameMode::Ms20),
-        tier: Tier::ReportOnly,
+        tier: Tier::PsnrFloor(11.0),
     });
 }
 
@@ -549,7 +598,8 @@ fn corpus_transition_part_a_20ms() {
         input_file: "part_a_20ms.lbc",
         expected_file: "expected_part_a.wav",
         carriage: Carriage::StorageFormat,
-        tier: Tier::ReportOnly,
+        // Baseline 12.31 dB.
+        tier: Tier::PsnrFloor(9.0),
     });
 }
 
@@ -560,7 +610,8 @@ fn corpus_transition_part_b_30ms() {
         input_file: "part_b_30ms.lbc",
         expected_file: "expected_part_b.wav",
         carriage: Carriage::StorageFormat,
-        tier: Tier::ReportOnly,
+        // Baseline 15.09 dB.
+        tier: Tier::PsnrFloor(12.0),
     });
 }
 
@@ -623,9 +674,13 @@ fn corpus_transition_concatenated_raw_with_known_splice() {
         .collect();
 
     let s = score(&ours, &reference);
+    // Baseline 13.76 dB. Same regression floor / margin shape as the
+    // other corpus cases (see module-level Tiering note).
+    let floor_db = 11.0_f64;
     eprintln!(
-        "[ReportOnly] transition-mid-stream-concat (20+30, splice@760B): \
+        "[PsnrFloor({:.1})] transition-mid-stream-concat (20+30, splice@760B): \
          ours={} ref={} cmp_n={} exact={}/{} ({:.4}%) max|d|={} rms={:.2} psnr={:.2} dB",
+        floor_db,
         s.n_ours,
         s.n_ref,
         s.n,
@@ -635,5 +690,12 @@ fn corpus_transition_concatenated_raw_with_known_splice() {
         s.max_abs_diff,
         s.rmse(),
         s.psnr_db()
+    );
+    let got = s.psnr_db();
+    assert!(
+        got >= floor_db,
+        "transition-mid-stream-concat: PSNR {:.2} dB fell below floor {:.2} dB",
+        got,
+        floor_db,
     );
 }

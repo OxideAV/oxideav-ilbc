@@ -120,12 +120,17 @@ Flagged explicitly in each module where they apply:
   and lifts the SNR floor by 1-3 dB across all four test signals.
   Reference: round 21 sweep in CHANGELOG.
 - The `tests/docs_corpus.rs` driver decodes FFmpeg-encoded fixtures
-  successfully across all 16 cases, but every fixture is currently
-  `Tier::ReportOnly` (no PSNR-floor gating). iLBC is a CELP codec —
-  two independent decoders typically differ at the sub-LSB level due
-  to LSF→LPC rounding, all-pass phase compensator drift, the optional
-  enhancer, and post-filter; tightening to numeric floors is a
-  follow-up once the per-fixture residuals are catalogued.
+  successfully across all 16 cases. As of round 173 every fixture
+  carries a per-case `Tier::PsnrFloor` regression gate anchored 2-3 dB
+  beneath the observed PSNR: silence 70 dB (vs baseline ~74 dB),
+  step-impulse 30 dB (vs 34 dB), voiced / sine / dtmf 13-15 dB (vs
+  16-19 dB), noise 9-10 dB (vs 12-13 dB). The margin absorbs sub-LSB
+  cross-runner float drift in the CELP path (LSF→LPC rounding, the
+  §4.2 all-pass phase compensator, the optional §4.6 enhancer, and
+  post-filter) while still red-lighting CI on any per-fixture
+  regression bigger than the margin. Tighter case-by-case floors are
+  a follow-up once a cross-runner span (linux x86-64 / macOS aarch64)
+  has been catalogued.
 
 Net effect: structurally complete encoder + decoder that produces
 bounded mono 8 kHz PCM on any well-formed 38-/50-byte iLBC payload

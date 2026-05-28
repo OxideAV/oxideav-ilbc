@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (round 173 — `docs_corpus` PSNR-floor gating)
+
+- `tests/docs_corpus.rs` now carries a per-fixture `Tier::PsnrFloor`
+  regression gate on every one of the 16 cases (10 single-mode +
+  3 multi-view containerless/RTP + 2 mid-stream-transition halves +
+  1 concatenated splice). Through round 122 every case sat in
+  `Tier::ReportOnly` while the per-fixture PSNR was being catalogued.
+  The catalogue is now empirically pinned (see README "Deviations" /
+  module-level Tiering note) and each floor sits 2-3 dB beneath the
+  observed PSNR — wide enough to absorb sub-LSB cross-runner float
+  drift in the CELP path (LSF→LPC rounding, the §4.2 all-pass phase
+  compensator, the optional §4.6 enhancer, and post-filter) while
+  still catching any future regression bigger than the margin. Floors
+  pinned this round (baseline → floor):
+  - silence 20 ms 74.67 → 70.00 dB
+  - silence 30 ms 74.03 → 70.00 dB
+  - step-impulse 20 ms 34.24 → 30.00 dB
+  - voice-like 30 ms 18.97 → 15.00 dB
+  - dtmf-tones 20 ms 17.34 → 14.00 dB
+  - sine 20 ms 15.95 → 13.00 dB
+  - sine 30 ms 15.91 → 13.00 dB
+  - voice-like 20 ms 15.78 → 13.00 dB
+  - transition 30 ms 15.09 → 12.00 dB
+  - containerless (× 3 views) 13.63 → 11.00 dB
+  - transition concat 13.76 → 11.00 dB
+  - noise 30 ms 12.80 → 10.00 dB
+  - noise 20 ms 11.99 → 9.00 dB
+  - transition 20 ms 12.31 → 9.00 dB
+- `Tier::ReportOnly` is retained (with `#[allow(dead_code)]`) so a
+  future fixture can be added in report-only mode without losing
+  the empirical-PSNR-catalogue step.
+
 ### Added (round 123 — RFC §3.5.3 / Appendix A.46 `AbsQuantW` start-state DPCM)
 
 - `state_encode::abs_quant_w`: the RFC 3951 §3.5.3 predictive
