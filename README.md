@@ -162,6 +162,25 @@ pipeline that we have not stood up.
 | §4.6 enhancer constraint (`b`) | tuned from RFC's 0.05 to 0.005 (round-21 SNR sweep) |
 | §4.7 enhancer-delay LPC shift in analysis filter | full |
 
+## Benchmarks
+
+Criterion harnesses in `benches/` time the decoder hot path, the
+encoder hot path, and the paired round-trip through the public
+trait surface. Every PCM input is synthesised in-bench from a
+deterministic xorshift32 seed, so the harnesses ship no committed
+fixture files and read nothing under `docs/`.
+
+```sh
+cargo bench -p oxideav-ilbc --bench decode
+cargo bench -p oxideav-ilbc --bench encode
+cargo bench -p oxideav-ilbc --bench roundtrip
+```
+
+Each harness covers three scenarios: 20 ms framing × 1 s,
+30 ms framing × 1 s, and 20 ms framing × 3 s (the long clip lets
+the enhancer pitch buffer and the encoder's `prev_a_per_sub`
+carry-over reach steady state).
+
 ## Codec id
 
 - `"ilbc"` — registered as a software decoder via

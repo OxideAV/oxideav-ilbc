@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (round 180 — depth-mode benchmarks)
+
+- `benches/decode.rs`, `benches/encode.rs`, `benches/roundtrip.rs`:
+  Criterion harnesses (`harness = false`) for the decoder hot path,
+  the encoder hot path, and the paired encode-then-decode
+  round-trip. Each binary is self-contained — every PCM input is
+  synthesised in-bench from a deterministic xorshift32 seed and fed
+  through the public trait surface
+  (`oxideav_ilbc::encoder::make_encoder` /
+  `decoder::make_decoder`). No `docs/` fixtures or external files
+  are read. Three scenarios per harness:
+  - mono S16 PCM at 8 kHz, 20 ms framing, 1 s clip
+  - mono S16 PCM at 8 kHz, 30 ms framing, 1 s clip
+  - mono S16 PCM at 8 kHz, 20 ms framing, 3 s clip (steady-state
+    enhancer + encoder carry-over)
+  Run with `cargo bench -p oxideav-ilbc --bench <name>`. Future
+  optimisation rounds can A/B-test their tweaks to the LPC
+  analysis, split-VQ LSF quantiser, start-state scalar coder,
+  adaptive-codebook search, and synthesis + enhancer path against
+  a stable, fixture-free baseline. Adds `criterion = "0.5"` as a
+  `[dev-dependencies]` line; the runtime dep set is unchanged.
+
 ### Changed (round 173 — `docs_corpus` PSNR-floor gating)
 
 - `tests/docs_corpus.rs` now carries a per-fixture `Tier::PsnrFloor`

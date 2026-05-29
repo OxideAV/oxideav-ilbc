@@ -15,3 +15,33 @@ categories = ["multimedia::encoding", "multimedia::audio"]
 
 [dependencies]
 oxideav-core = "0.1"
+
+[dev-dependencies]
+# Round 180 (depth-mode benchmarks): Criterion drives three bench
+# harnesses (`decode`, `encode`, `roundtrip`) so future iLBC
+# optimisation rounds can A/B-test their tweaks to the LPC
+# analysis, split-VQ LSF quantiser, start-state scalar coder,
+# adaptive-codebook search, and synthesis + enhancer path against
+# a stable, fixture-free baseline. Pinned to the same 0.5 line the
+# other OxideAV crates with benches (flac, g711, tta, magicyuv,
+# h264, cinepak, pixfmt) already track.
+criterion = "0.5"
+
+# Round 180 benches. Each binary lives in `benches/<name>.rs` and is
+# self-contained — every PCM input is synthesised in-bench from a
+# deterministic xorshift seed and fed through the public
+# `oxideav_ilbc::encoder::make_encoder` /
+# `decoder::make_decoder` trait objects. No `docs/` fixtures or
+# external files are read. Run with:
+#     cargo bench -p oxideav-ilbc --bench <name>
+[[bench]]
+name = "decode"
+harness = false
+
+[[bench]]
+name = "encode"
+harness = false
+
+[[bench]]
+name = "roundtrip"
+harness = false
