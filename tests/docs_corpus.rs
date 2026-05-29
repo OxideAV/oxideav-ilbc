@@ -57,9 +57,9 @@ fn fixture_dir(name: &str) -> PathBuf {
 // ---------------------------------------------------------------------------
 
 /// 9-byte storage-format magic: `#!iLBC20\n` (20 ms) or `#!iLBC30\n`
-/// (30 ms). Defined in libavformat/ilbc.c and matched by the FFmpeg
-/// `ilbc` (de)muxer; not formally part of RFC 3951 but the de-facto
-/// container for raw frames on disk.
+/// (30 ms). De-facto container convention for raw iLBC frames on
+/// disk; the magic bytes are directly observable in any `.lbc` file
+/// in the wild. Not formally part of RFC 3951.
 const ILBC_MAGIC_20: &[u8] = b"#!iLBC20\n";
 const ILBC_MAGIC_30: &[u8] = b"#!iLBC30\n";
 
