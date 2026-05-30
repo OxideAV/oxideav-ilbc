@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/OxideAV/oxideav-ilbc/compare/v0.0.5...v0.0.6) - 2026-05-29
+
+### Other
+
+- scrub libavformat/ilbc.c docs pointer from .lbc magic comment
+- depth-mode criterion harnesses for decode / encode / roundtrip
+- per-fixture Tier::PsnrFloor gating (round 173)
+- AbsQuantW — carry weighting-filter state across the sub-block switch
+- RFC §3.5.3 AbsQuantW start-state DPCM noise-shaping quantiser
+
 ### Added (round 180 — depth-mode benchmarks)
 
 - `benches/decode.rs`, `benches/encode.rs`, `benches/roundtrip.rs`:
