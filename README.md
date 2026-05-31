@@ -137,10 +137,10 @@ bounded mono 8 kHz PCM on any well-formed 38-/50-byte iLBC payload
 and on empty / lost frames; output is not guaranteed to be bit-exact
 against the RFC 3951 reference (CELP rounding drift) and we have no
 third-party encoder oracle in CI. Workspace policy bars consulting
-libilbc / WebRTC iLBC / freeswitch / ffmpeg's iLBC source as a
-clean-room reference, so cross-encoder validation against a known
-good third-party encoder would require a black-box binary fixture
-pipeline that we have not stood up.
+any external iLBC implementation as a clean-room reference, so
+cross-encoder validation against a known-good third-party encoder
+would require a black-box binary fixture pipeline that we have not
+stood up.
 
 ### Encoder fidelity surface (RFC 3951)
 
@@ -180,6 +180,45 @@ Each harness covers three scenarios: 20 ms framing × 1 s,
 30 ms framing × 1 s, and 20 ms framing × 3 s (the long clip lets
 the enhancer pitch buffer and the encoder's `prev_a_per_sub`
 carry-over reach steady state).
+
+## RTP payload format (RFC 3952)
+
+The `rtp` module implements the iLBC RTP payload format defined by
+RFC 3952. It is deliberately a pure depacketiser / packetiser — the
+12-byte fixed RTP header lives one layer above this crate and is
+codec-agnostic.
+
+Covered:
+
+- **§3 *Payload Format*** — the iLBC RTP payload is the encoded
+  bitstream itself with no per-packet codec header. One RTP packet
+  MAY carry one or more iLBC frames, and all frames in a packet
+  share the SDP-pinned mode (20 ms / 38 B or 30 ms / 50 B). The
+  depacketiser splits a payload into fixed-size chunks for the
+  decoder; the packetiser aggregates frames up to a per-packet
+  cap and emits per-packet RTP-timestamp offsets (160 samples
+  per 20 ms frame, 240 per 30 ms frame).
+- **§4.2 *Mapping to SDP*** — `Depacketiser::from_sdp_fmtp` parses
+  the `mode=20|30` parameter from an `a=fmtp:<pt> ...` line and
+  pins the depacketiser to that mode. The `mode` key is matched
+  case-insensitively per the SDP convention; unknown values and a
+  missing parameter are hard errors (the receiver MUST know the
+  mode out of band — falling back to a silent default would mask
+  interop bugs).
+- **Length-only mode hint** — `detect_mode_from_payload_len`
+  inspects a payload whose mode has been lost in transit and
+  reports `FrameMode::Ms20` / `Ms30` / `None` (ambiguous). Useful
+  as a corruption check, not as a primary mode source.
+- **Empty-frame surrogate** — `empty_marker_frame(mode)` yields a
+  buffer the decoder treats as "packet lost; run PLC" (RFC 3951
+  §3.8 / §4.5 — empty-frame indicator at LSB of the last byte).
+
+The depacketiser → decoder handoff is exercised end-to-end by
+`tests/rtp_depacketiser_drives_decoder.rs`: encoder emits 2–5
+frames per scenario, packetiser aggregates them under a per-packet
+cap, depacketiser splits the body back into individual iLBC
+payloads, and the decoder produces the correct `n * 160` or
+`n * 240`-sample PCM stream.
 
 ## Codec id
 

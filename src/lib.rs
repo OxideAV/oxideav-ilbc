@@ -19,6 +19,10 @@
 //!   PLC unit (§4.5).
 //! - [`decoder`]: wires those pieces into the `oxideav_core::Decoder`
 //!   trait.
+//! - [`rtp`]: RFC 3952 RTP payload depacketiser + packetiser
+//!   (§3 one-or-more-frames-per-packet, §4.2 SDP `mode=20|30`).
+//!   Off the audio hot-path; for use by callers driving iLBC over
+//!   an RTP session.
 //!
 //! The frame mode is inferred from packet length:
 //! - 38 bytes  -> 20 ms / 160 samples / 304 bits
@@ -37,6 +41,7 @@ pub mod lpc_analysis;
 pub mod lsf;
 pub mod lsf_quant;
 pub mod lsf_tables;
+pub mod rtp;
 pub mod state;
 pub mod state_encode;
 pub mod synthesis;

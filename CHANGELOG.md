@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (round 200 — RFC 3952 RTP payload format depacketiser / packetiser)
+
+- `src/rtp.rs`: depacketiser + packetiser for the iLBC RTP payload
+  format (RFC 3952 §3 — one or more frames per packet, all sharing
+  the SDP-pinned mode). `Depacketiser::new(mode)` /
+  `Depacketiser::from_sdp_fmtp("mode=20|30; ...")` splits an RTP
+  payload (post-RTP-header) into fixed-size 38- or 50-byte iLBC
+  frames; `Packetiser::pack_single` / `Packetiser::pack_series`
+  aggregates frames up to a per-packet cap (default 8) and emits
+  per-packet RTP-timestamp offsets (160 samples per 20 ms frame,
+  240 per 30 ms frame). Length-only mode hint
+  (`detect_mode_from_payload_len`) and a `empty_marker_frame(mode)`
+  PLC-surrogate helper round out the module. 31 unit tests cover
+  SDP fmtp parsing (case-insensitive `mode=`, whitespace, missing
+  parameter, unknown values), single / multi-frame depacketisation
+  for both modes, packetiser caps, pack_series chunking and
+  timestamps, pack-then-depacketise round-trip, and length-only
+  mode detection.
+- `tests/rtp_depacketiser_drives_decoder.rs`: 7 integration tests
+  that run the encoder → packetiser → depacketiser → decoder
+  pipeline end-to-end. Three-frame 20 ms aggregation, two-frame
+  30 ms aggregation, pack_series-then-decode (5 frames at cap=2 →
+  3 packets sized 2+2+1, shared decoder so per-packet boundaries
+  do not reset state), and SDP-fmtp-pinned variants for both
+  modes. Each test asserts the decoder produces the right
+  `n * 160` or `n * 240`-sample PCM stream with no panic.
+- README `## RTP payload format (RFC 3952)` section documenting
+  the new module's surface (§3 aggregation, §4.2 SDP `mode=`,
+  length-only hint, empty-frame surrogate).
+- README "Net effect" paragraph reworded to no longer name
+  external iLBC implementations explicitly — workspace policy
+  is the operative phrasing.
+
 ## [0.0.6](https://github.com/OxideAV/oxideav-ilbc/compare/v0.0.5...v0.0.6) - 2026-05-29
 
 ### Other
