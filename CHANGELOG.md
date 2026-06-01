@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (round 204 — `cargo-fuzz` harness with RTP depacketiser target)
+
+- `fuzz/Cargo.toml` + `fuzz/fuzz_targets/{decode,encode_roundtrip,
+  rtp_depacketise}.rs`: nested-workspace `cargo-fuzz` harness
+  exercising every attacker-facing parse the crate ships. Three
+  targets:
+  - `decode` — feeds arbitrary fuzz bytes through `parse_packet`
+    (§3.8 bit-reader path) and through `make_decoder` +
+    `send_packet` / `receive_frame`, both as the whole payload and
+    as sliding 38- / 50-byte windows on a single decoder instance
+    (so the inter-frame enhancer + post-filter +
+    `prev_a_per_sub` LPC-shift carry-over runs). Per-mode sample
+    count + S16 byte count asserted on every accepted packet.
+  - `encode_roundtrip` — drives arbitrary S16 PCM bytes through
+    the encoder (mode / `hp_filter` / `state_dpcm` toggled from a
+    seed byte) and pushes every emitted packet through the
+    decoder. Asserts each emitted packet is exactly 38 or 50
+    bytes, the decoder produces the matching `n*160` /
+    `n*240`-sample audio frame, and `flush` is panic-free.
+  - `rtp_depacketise` — new this round: drives the RFC 3952
+    surface (`parse_mode_from_fmtp`,
+    `Depacketiser::from_sdp_fmtp`, `Depacketiser::depacketise`
+    borrowed + owned, `Packetiser::pack_series`,
+    `detect_mode_from_payload_len`, `empty_marker_frame`). Asserts
+    the borrowed and owned depacketise variants agree on every
+    input, that every accepted depacketisation reconstitutes the
+    input byte-for-byte (no data loss / reordering / overlap),
+    and that a `pack_series` → `depacketise` round-trip preserves
+    the original frame list with monotone-non-decreasing per-
+    packet RTP timestamps. The SDP fmtp string is exercised via
+    `String::from_utf8_lossy` so the fuzzer drives both ASCII and
+    arbitrary UTF-8.
+- README `## Fuzzing` section documenting the three targets and
+  how to run them.
+
 ### Added (round 200 — RFC 3952 RTP payload format depacketiser / packetiser)
 
 - `src/rtp.rs`: depacketiser + packetiser for the iLBC RTP payload

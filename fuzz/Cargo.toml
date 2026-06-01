@@ -1,0 +1,100 @@
+[package]
+name = "oxideav-ilbc-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# iLBC's two attacker-facing surfaces are both worth fuzzing.
+#
+# Decoder (`make_decoder` → `IlbcDecoder` via the `oxideav_core::Decoder`
+# trait): a 38-byte (20 ms) or 50-byte (30 ms) iLBC payload is unpacked
+# by the MSB-first bit reader (RFC 3951 §3.8 / Table 3.2 three-class
+# layout) into split-VQ LSF indices, a 3-bit shape + 6-bit log-scale
+# start-state code, per-sub-block 3-stage adaptive-codebook indices,
+# successive-rescaled gain indices, a `block_class` (`start_idx`)
+# selector, a `position` bit, and an empty-frame indicator. Each of
+# those drives a table lookup (`lsf_tables`, `state_sq3Tbl`,
+# `state_frgqTbl`, `gain_sq{3,4,5}Tbl`) and an arithmetic step
+# (LSF→LPC, all-pass phase compensator, multi-stage codebook
+# construction, IIR synthesis, optional §4.6 enhancer + §4.8 post-
+# filter) that the fuzzer drives across arbitrary byte payloads.
+# Feed arbitrary bytes to `Decoder::send_packet` / `receive_frame`
+# and assert it always returns a `Result` rather than panicking /
+# aborting / overflowing / indexing OOB / allocating an attacker-
+# controlled buffer.
+#
+# Encoder + roundtrip (`make_encoder` → `IlbcEncoder` then
+# `Decoder::send_packet`): drive arbitrary S16 PCM bytes through the
+# encoder (in both 20 ms and 30 ms modes, with the `hp_filter` and
+# `state_dpcm` options toggled from fuzz bytes) and push every
+# emitted packet straight through the decoder. Asserts (a) the
+# encoder never panics on hostile S16 samples / option combinations,
+# (b) every packet the encoder emits is well-formed enough for the
+# decoder to ingest without panicking, and (c) the output sample
+# count matches the mode (160 or 240 samples per accepted packet).
+# CELP rounding drift means we cannot demand bit-exact roundtrip on
+# the synthetic input (that's tested by `tests/round_trip_snr.rs`
+# against deterministic signals), but the panic-freedom + structural
+# coherence properties hold across arbitrary input.
+#
+# RTP depacketiser (`rtp_depacketise`): the RFC 3952 §3 / §4.2 payload
+# format surface exposed by `oxideav_ilbc::rtp` is the second
+# attacker-facing parse the crate ships — an SDP `a=fmtp:<pt> mode=…`
+# string from the signalling channel and a post-RTP-header payload
+# body from the wire. Both must be panic-free on hostile input. The
+# fuzz target exercises `parse_mode_from_fmtp`,
+# `Depacketiser::from_sdp_fmtp`, `Depacketiser::depacketise` (borrowed
+# + owned variants in lock-step), `detect_mode_from_payload_len`,
+# `empty_marker_frame`, and a `Packetiser::pack_series` →
+# `Depacketiser::depacketise` round-trip, asserting structural
+# invariants (per-frame length == mode.bytes(), reconstitution byte-
+# for-byte equality, timestamp monotonicity) on every iteration.
+#
+# There is no external library worth pulling in as a cross-decode
+# oracle — workspace policy bars consulting any external iLBC
+# implementation as a clean-room reference. The three targets cover
+# the attacker surface end-to-end.
+[dependencies]
+libfuzzer-sys = "0.4"
+# `oxideav-core` carries the `Decoder` / `Encoder` traits and the
+# `CodecParameters` / `Packet` / `Frame` / `AudioFrame` types the fuzz
+# targets construct directly. The version is pinned `0.1` per workspace
+# policy (never a `0.1.X` patch — keeps the workspace's [patch.crates-io]
+# path-override in charge of which build of core we resolve against).
+oxideav-core = "0.1"
+
+[dependencies.oxideav-ilbc]
+path = ".."
+
+# Prevent this from interfering with workspaces — the umbrella's
+# `crates/*` glob does not reach this nested directory anyway, but
+# pinning members = ["."] makes the fuzz crate self-contained and
+# matches the convention used by every other oxideav-* fuzz harness
+# in the project (tta, magicyuv, mp4, mkv, tiff, pcx, qoi, wbmp,
+# icer, h261).
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "encode_roundtrip"
+path = "fuzz_targets/encode_roundtrip.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "rtp_depacketise"
+path = "fuzz_targets/rtp_depacketise.rs"
+test = false
+doc = false

@@ -181,6 +181,48 @@ Each harness covers three scenarios: 20 ms framing × 1 s,
 the enhancer pitch buffer and the encoder's `prev_a_per_sub`
 carry-over reach steady state).
 
+## Fuzzing
+
+A `cargo-fuzz` harness in `fuzz/` exercises every attacker-facing
+parse the crate ships, asserting *panic-freedom* + structural
+invariants on arbitrary fuzz-supplied bytes:
+
+```sh
+cargo +nightly fuzz run decode
+cargo +nightly fuzz run encode_roundtrip
+cargo +nightly fuzz run rtp_depacketise
+```
+
+- **`decode`** — drives raw byte payloads through the §3.8 bit-reader,
+  through `make_decoder` + `send_packet` / `receive_frame`, and across
+  sliding 20 ms (38 B) and 30 ms (50 B) windows on the *same* decoder
+  instance to exercise the inter-frame enhancer + post-filter +
+  `prev_a_per_sub` LPC-shift carry-over. Asserts the per-mode sample
+  count and S16 byte count on every accepted packet.
+- **`encode_roundtrip`** — drives arbitrary S16 PCM bytes through the
+  encoder (mode + `hp_filter` + `state_dpcm` toggled from a seed
+  byte) and pushes every emitted packet straight back through the
+  decoder. Asserts every encoder-emitted packet is exactly 38 or 50
+  bytes and that the decoder produces the matching `n*160` /
+  `n*240`-sample audio frame without panicking, plus a panic-free
+  `flush`.
+- **`rtp_depacketise`** — drives the RFC 3952 RTP surface
+  (`parse_mode_from_fmtp`, `Depacketiser::from_sdp_fmtp`,
+  `Depacketiser::depacketise` borrowed + owned, `pack_series`,
+  `detect_mode_from_payload_len`, `empty_marker_frame`). Asserts the
+  borrowed and owned depacketise variants agree on every input, that
+  every accepted depacketisation reconstitutes the input
+  byte-for-byte, and that a `Packetiser::pack_series` →
+  `Depacketiser::depacketise` round-trip preserves the original
+  frame list and emits monotone-non-decreasing per-packet RTP
+  timestamps.
+
+The targets share `oxideav-ilbc-fuzz` as a nested workspace
+(`fuzz/Cargo.toml`) so the umbrella's `crates/*` glob does not pull
+them in. Workspace policy bars consulting any external iLBC
+implementation as a cross-decode oracle, so the three targets cover
+the attacker surface end-to-end without an external comparison.
+
 ## RTP payload format (RFC 3952)
 
 The `rtp` module implements the iLBC RTP payload format defined by
