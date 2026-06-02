@@ -79,7 +79,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
-- scrub libavformat/ilbc.c docs pointer from .lbc magic comment
+- scrub third-party source pointer from .lbc magic comment
 - depth-mode criterion harnesses for decode / encode / roundtrip
 - per-fixture Tier::PsnrFloor gating (round 173)
 - AbsQuantW — carry weighting-filter state across the sub-block switch
@@ -251,13 +251,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 The structural §3.5.1 `block_class` gap is now closed. The remaining
 gap is **CI cross-decoder validation**: workspace policy bars
-consulting libilbc / WebRTC iLBC / freeswitch / ffmpeg's iLBC
-encoder source as a reference oracle, so we have no third-party
-implementation to compare against. The `tests/docs_corpus.rs` driver
-*decodes* FFmpeg-encoded fixtures successfully (all 16 tier
-"ReportOnly") but no test compares our *encoder* output to a known
-third-party encoder. This is a CI-coverage caveat documented in
-the per-crate README; the encoder is otherwise spec-shape complete.
+consulting any third-party iLBC encoder source as a reference
+oracle, so we have no external implementation to compare against.
+The `tests/docs_corpus.rs` driver *decodes* reference-binary-encoded
+fixtures successfully (all 16 tier "ReportOnly") but no test compares
+our *encoder* output to a known external encoder. This is a
+CI-coverage caveat documented in the per-crate README; the encoder
+is otherwise spec-shape complete.
 
 ### Self-roundtrip SNR (synthetic voiced + sine)
 
