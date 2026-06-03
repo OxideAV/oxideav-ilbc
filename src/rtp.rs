@@ -335,6 +335,59 @@ pub fn detect_mode_from_payload_len(payload_len: usize) -> Option<FrameMode> {
     }
 }
 
+/// Per-frame duration in milliseconds. 20 ms for [`FrameMode::Ms20`]
+/// and 30 ms for [`FrameMode::Ms30`]; this is also the
+/// recommended-`ptime` (packetisation time) value when only one
+/// iLBC frame is carried per RTP packet, and the building block of
+/// `maxptime` when more than one frame is aggregated. RFC 3952 §4.2
+/// pins one frame mode for the whole session, so the per-frame
+/// duration is constant for the session's lifetime.
+pub fn frame_duration_ms(mode: FrameMode) -> u32 {
+    match mode {
+        FrameMode::Ms20 => 20,
+        FrameMode::Ms30 => 30,
+    }
+}
+
+/// Emit just the `mode=20` / `mode=30` token for an SDP `a=fmtp:<pt>`
+/// parameter list, per RFC 3952 §4.2. The output is the inverse of
+/// [`parse_mode_from_fmtp`] on the same value and is intended as a
+/// building block for callers stitching together an outbound
+/// `a=fmtp:<pt> ...` value from several parameters; the bare key=value
+/// pair carries no leading or trailing whitespace and no `;`
+/// terminator, so the caller can join several parameters with
+/// `;` separators of its choice.
+pub fn format_mode_fmtp(mode: FrameMode) -> String {
+    format!("mode={}", frame_duration_ms(mode))
+}
+
+/// Emit the body (everything after the `a=fmtp:<pt> ` token) of an
+/// outbound SDP `fmtp` attribute pinning the iLBC session to the
+/// supplied mode and optional per-packet aggregation cap.
+///
+/// The emitted parameter list is always `mode=N` where `N` is `20` or
+/// `30`, optionally followed by `;maxptime=M` when
+/// `max_frames_per_packet` is supplied and greater than 1. RFC 3952
+/// §4.2 names `mode` as the only iLBC-specific fmtp parameter; the
+/// `maxptime` attribute (RFC 4566 §6) is a session-level cap on
+/// packetisation time and is honoured by SDP-aware receivers as a
+/// hint for the maximum frame count per packet (`maxptime` /
+/// per-frame ms).
+///
+/// The output is the inverse of [`Depacketiser::from_sdp_fmtp`] +
+/// [`parse_mode_from_fmtp`]: an `fmtp` value emitted here round-trips
+/// back to the same [`FrameMode`] without any whitespace shaping.
+pub fn build_fmtp(mode: FrameMode, max_frames_per_packet: Option<usize>) -> String {
+    let mut out = format_mode_fmtp(mode);
+    if let Some(n) = max_frames_per_packet {
+        if n > 1 {
+            let cap_ms = (n as u32).saturating_mul(frame_duration_ms(mode));
+            out.push_str(&format!(";maxptime={cap_ms}"));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,5 +730,64 @@ mod tests {
         let frames = dk.depacketise(&m).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0], m.as_slice());
+    }
+
+    // ----- per-frame duration helper -----
+
+    #[test]
+    fn frame_duration_matches_mode() {
+        assert_eq!(frame_duration_ms(FrameMode::Ms20), 20);
+        assert_eq!(frame_duration_ms(FrameMode::Ms30), 30);
+    }
+
+    // ----- outbound SDP fmtp builders -----
+
+    #[test]
+    fn format_mode_emits_bare_key_value() {
+        assert_eq!(format_mode_fmtp(FrameMode::Ms20), "mode=20");
+        assert_eq!(format_mode_fmtp(FrameMode::Ms30), "mode=30");
+    }
+
+    #[test]
+    fn format_mode_round_trips_through_parse() {
+        for m in [FrameMode::Ms20, FrameMode::Ms30] {
+            let s = format_mode_fmtp(m);
+            assert_eq!(parse_mode_from_fmtp(&s).unwrap(), m);
+        }
+    }
+
+    #[test]
+    fn build_fmtp_without_cap_emits_just_mode() {
+        assert_eq!(build_fmtp(FrameMode::Ms20, None), "mode=20");
+        assert_eq!(build_fmtp(FrameMode::Ms30, None), "mode=30");
+        // Cap of 1 collapses to "just mode=N" — maxptime equal to one
+        // per-frame ptime would be a no-op for an SDP receiver.
+        assert_eq!(build_fmtp(FrameMode::Ms20, Some(1)), "mode=20");
+        assert_eq!(build_fmtp(FrameMode::Ms30, Some(1)), "mode=30");
+    }
+
+    #[test]
+    fn build_fmtp_with_cap_emits_maxptime_in_ms() {
+        // 4 × 20 ms = 80 ms / 4 × 30 ms = 120 ms.
+        assert_eq!(build_fmtp(FrameMode::Ms20, Some(4)), "mode=20;maxptime=80");
+        assert_eq!(build_fmtp(FrameMode::Ms30, Some(4)), "mode=30;maxptime=120");
+        // Default packetiser cap of 8.
+        assert_eq!(build_fmtp(FrameMode::Ms20, Some(8)), "mode=20;maxptime=160");
+        assert_eq!(build_fmtp(FrameMode::Ms30, Some(8)), "mode=30;maxptime=240");
+    }
+
+    #[test]
+    fn build_fmtp_round_trips_with_parser_and_packetiser_cap() {
+        // build → parse round-trips the mode; the parser ignores
+        // maxptime (it's not iLBC-specific).
+        for m in [FrameMode::Ms20, FrameMode::Ms30] {
+            for cap in [None, Some(1), Some(2), Some(8)] {
+                let s = build_fmtp(m, cap);
+                assert_eq!(parse_mode_from_fmtp(&s).unwrap(), m, "fmtp={s:?}");
+                // The depacketiser construction path is also happy.
+                let dk = Depacketiser::from_sdp_fmtp(&s).unwrap();
+                assert_eq!(dk.mode(), m);
+            }
+        }
     }
 }

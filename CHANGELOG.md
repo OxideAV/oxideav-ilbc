@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (round 226 — RFC 3952 §4.2 outbound SDP fmtp builders)
+
+- `src/rtp.rs`: three new helpers that close the outbound side of the
+  RFC 3952 §4.2 SDP `mode=` surface (the inbound side
+  `parse_mode_from_fmtp` / `Depacketiser::from_sdp_fmtp` shipped in
+  round 200).
+  - `frame_duration_ms(mode) -> u32` — 20 / 30, the per-frame
+    duration in ms and the `ptime` building block.
+  - `format_mode_fmtp(mode) -> String` — emits the bare `mode=20` /
+    `mode=30` token an outbound `a=fmtp:<pt>` parameter list would
+    carry.
+  - `build_fmtp(mode, max_frames_per_packet) -> String` — emits a
+    single-line fmtp value that pins the iLBC session to `mode`,
+    optionally appending `;maxptime=M` where `M = N * frame_ms` when
+    the caller wants to advertise a per-packet aggregation cap
+    (mirrors `Packetiser::with_max_frames_per_packet`). A cap of 0
+    or 1 collapses to a bare `mode=N` (a `maxptime` equal to one
+    per-frame `ptime` is a no-op).
+- 6 new unit tests in `src/rtp.rs`
+  (`frame_duration_matches_mode`, `format_mode_emits_bare_key_value`,
+  `format_mode_round_trips_through_parse`,
+  `build_fmtp_without_cap_emits_just_mode`,
+  `build_fmtp_with_cap_emits_maxptime_in_ms`,
+  `build_fmtp_round_trips_with_parser_and_packetiser_cap`). The
+  round-trip test also feeds the emitted string through
+  `Depacketiser::from_sdp_fmtp` to assert the outbound and inbound
+  halves of the SDP surface agree on the pinned mode for every cap
+  value.
+
 ### Changed (round 219 — RFC 3951 §3.8 ULP bit layout, drops flat-layout deviation)
 
 - `src/ulp.rs`: new private module hosting `ULP_20MS` / `ULP_30MS`

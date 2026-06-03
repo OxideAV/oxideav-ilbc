@@ -269,7 +269,14 @@ Covered:
   case-insensitively per the SDP convention; unknown values and a
   missing parameter are hard errors (the receiver MUST know the
   mode out of band — falling back to a silent default would mask
-  interop bugs).
+  interop bugs). The outbound counterpart `format_mode_fmtp(mode)`
+  emits the bare `mode=20` / `mode=30` token, and
+  `build_fmtp(mode, max_frames_per_packet)` stitches the mode token
+  together with an optional `;maxptime=M` cap (where
+  `M = N * frame_ms`, mirroring `Packetiser::with_max_frames_per_packet`).
+  A cap of 0 or 1 collapses to a bare `mode=N`. The emitted string
+  round-trips back through `parse_mode_from_fmtp` and
+  `Depacketiser::from_sdp_fmtp` to the same `FrameMode`.
 - **Length-only mode hint** — `detect_mode_from_payload_len`
   inspects a payload whose mode has been lost in transit and
   reports `FrameMode::Ms20` / `Ms30` / `None` (ambiguous). Useful
