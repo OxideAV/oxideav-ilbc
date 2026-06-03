@@ -15,8 +15,12 @@
 //! - [`cb`]: multistage adaptive-codebook construction and gain
 //!   dequantisation (§4.3 / §4.4).
 //! - [`synthesis`]: 10th-order LPC synthesis (§4.7), pitch-emphasis
-//!   post-filter (§4.8 simplified), and a dampened pitch-synchronous
-//!   PLC unit (§4.5).
+//!   post-filter (legacy helper kept for tests), and a dampened
+//!   pitch-synchronous PLC unit (§4.5).
+//! - [`hp_filter`]: §3.1 input HP biquad (encoder pre-processing, 90 Hz
+//!   cutoff) and §4.8 output HP biquad (decoder post-processing, 65 Hz
+//!   cutoff). Both opt-in via `hp_filter=on` on the corresponding
+//!   `CodecParameters`.
 //! - [`decoder`]: wires those pieces into the `oxideav_core::Decoder`
 //!   trait.
 //! - [`rtp`]: RFC 3952 RTP payload depacketiser + packetiser

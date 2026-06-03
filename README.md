@@ -59,7 +59,9 @@ PTS at the 8 kHz time base.
   compensator, 3-stage adaptive codebook excitation with successive-
   rescaled gain dequantisation, 10th-order LPC synthesis with the
   RFC 3951 §4.7 enhancer-delay shift (1 sub-block for 20 ms, 2 for 30 ms),
-  dampened pitch-synchronous PLC for lost / empty-indicated frames.
+  dampened pitch-synchronous PLC for lost / empty-indicated frames,
+  optional §4.8 65 Hz output HP post-filter (opt-in via `hp_filter=on`
+  in `CodecParameters::options`).
 - §4.6 RFC-proper enhancer (six-PSSQ pitch-synchronous combiner with the
   Lagrange-constraint optimisation from §4.6.4 / §4.6.5).
 - Encoder: LPC analysis (asymmetric / Hanning windowing → autocorrelation
@@ -141,6 +143,15 @@ any external iLBC implementation as a clean-room reference, so
 cross-encoder validation against a known-good third-party encoder
 would require a black-box binary fixture pipeline that we have not
 stood up.
+
+### Decoder post-processing surface (RFC 3951)
+
+| Subsystem | Status |
+| --- | --- |
+| §4.6 enhancer (six-PSSQ pitch-synchronous combiner) | full |
+| §4.7 enhancer-delay LPC shift in synthesis filter | full |
+| §4.8 65 Hz output HP biquad post-filter (`hpOutput`) | opt-in (`hp_filter=on`); RFC §4.8 marks as "if desired" |
+| §4.5 dampened pitch-synchronous PLC | full (empty-frame indicator + zero-length packet) |
 
 ### Encoder fidelity surface (RFC 3951)
 

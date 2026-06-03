@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (round 215 — RFC 3951 §4.8 output HP post-filter)
+
+- `src/hp_filter.rs`: new `HpOutputState` + `hp_output` / `hp_output_vec`
+  helpers implementing the RFC 3951 §4.8 / Appendix A.30 65 Hz output
+  high-pass biquad with `hpo_zero_coefsTbl` /
+  `hpo_pole_coefsTbl` rounded to the nearest f32. Same Direct-Form-I
+  shape as the existing §3.1 input HP filter (`hp_input`), kept as a
+  separate state type so the encoder pre-filter and decoder post-
+  filter delay lines never alias.
+- `src/decoder.rs`: `make_decoder` now reads an `hp_filter` boolean from
+  `CodecParameters::options` (`on` / `1` / `true` / `yes` enable the
+  §4.8 post-filter; default off — RFC §4.8 marks the stage as "If
+  desired"). When enabled, the decoder applies `hp_output` to the
+  per-frame f32 PCM block before S16 quantisation, with the IIR delay
+  line carried across frame boundaries via the new
+  `IlbcDecoder::hp_state` field. `Decoder::reset` clears the delay
+  line.
+- 6 hp_filter unit tests covering the §4.8 path
+  (`output_dc_is_attenuated`, `output_high_frequency_passes`,
+  `output_low_frequency_attenuated` — 30 Hz attenuated > 6 dB,
+  `output_silence_in_silence_out`, `output_stable_under_square_wave`,
+  `output_vec_helper_matches_in_place`, `output_reset_clears_state`)
+  and 3 decoder unit tests
+  (`hp_filter_option_toggles_post_filter`,
+  `hp_filter_preserves_silence`, `reset_clears_hp_filter_state`). The
+  decoder tests assert default-off behaviour, `on`/`true` alias
+  equivalence, an observable per-sample diff on a non-trivial 0xAA
+  payload, and that `reset()` zeroes the §4.8 delay line so a primed
+  decoder matches a fresh one byte-for-byte after reset.
+- README `## Scope` / new "Decoder post-processing surface" table and
+  `src/lib.rs` module overview updated to enumerate the §4.6 / §4.7 /
+  §4.8 / §4.5 decoder post-processing stages alongside the existing
+  encoder fidelity table.
+
 ### Added (round 204 — `cargo-fuzz` harness with RTP depacketiser target)
 
 - `fuzz/Cargo.toml` + `fuzz/fuzz_targets/{decode,encode_roundtrip,

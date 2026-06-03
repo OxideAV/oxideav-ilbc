@@ -1,25 +1,43 @@
-//! Input high-pass pre-processing filter for the iLBC encoder
-//! (RFC 3951 §3.1, reference `hpInput` in Appendix A.28).
+//! High-pass biquad filters for the iLBC encoder input and decoder
+//! output paths.
 //!
-//! A 2nd-order biquad IIR with a 90 Hz cutoff is applied to the raw
-//! PCM input before it reaches the LPC analysis buffer. The filter
-//! removes DC and 50/60 Hz mains hum, which would otherwise eat
-//! quantisation budget in the LPC / start-state stages.
+//! Two filters share the same Direct-Form-I biquad shape but use
+//! different coefficient tables:
 //!
-//! Transfer function (RFC §3.1):
+//! - **Input** (`hp_input`, RFC 3951 §3.1, reference `hpInput` in
+//!   Appendix A.28): 2nd-order biquad IIR with a 90 Hz cutoff, applied
+//!   to the raw PCM input before it reaches the LPC analysis buffer.
+//!   Removes DC and 50/60 Hz mains hum, which would otherwise eat
+//!   quantisation budget in the LPC / start-state stages. The RFC
+//!   describes this as a conditional pre-processing step, so it is
+//!   opt-in via the encoder's `hp_filter=on` parameter.
+//! - **Output** (`hp_output`, RFC 3951 §4.8, reference `hpOutput` in
+//!   Appendix A.30): 2nd-order biquad IIR with a 65 Hz cutoff, applied
+//!   to the decoded PCM before S16 quantisation. Removes residual low-
+//!   frequency content the CELP synthesis filter may have introduced.
+//!   §4.8 ("Post Filtering") explicitly marks this as optional ("If
+//!   desired, the decoded block can be filtered..."), so it is opt-in
+//!   via the decoder's `hp_filter=on` parameter.
+//!
+//! Transfer function (both filters):
 //!
 //! ```text
 //!   H(z) = (b0 + b1 z^-1 + b2 z^-2) / (1 + a1 z^-1 + a2 z^-2)
 //!
-//!   b = [ 0.92727436, -1.8544941, 0.92727436 ]
-//!   a = [ 1.0,        -1.9059465, 0.9114024  ]
+//!   Input (§3.1, 90 Hz):
+//!     b = [ 0.92727436, -1.8544941,  0.92727436 ]
+//!     a = [ 1.0,        -1.9059465,  0.9114024  ]
+//!
+//!   Output (§4.8, 65 Hz):
+//!     b = [ 0.93980581, -1.8795834,  0.93980581 ]
+//!     a = [ 1.0,        -1.9330735,  0.93589199 ]
 //! ```
 //!
-//! The reference `hpInput` keeps state in a 4-element array:
+//! Each filter keeps state in a 4-element array:
 //!   - `mem[0] = x(n-1)`, `mem[1] = x(n-2)`  (input delay line)
 //!   - `mem[2] = y(n-1)`, `mem[3] = y(n-2)`  (output delay line)
 //!
-//! and processes the input in two passes (all-zero numerator, then
+//! and processes its input in two passes (all-zero numerator, then
 //! all-pole denominator). We fold both into a single Direct-Form-I
 //! biquad — bit-equivalent to the reference and one fewer pass over
 //! the data.
@@ -78,6 +96,68 @@ pub fn hp_input(input: &[f32], out: &mut [f32], state: &mut HpInputState) {
 pub fn hp_input_vec(input: &[f32], state: &mut HpInputState) -> Vec<f32> {
     let mut out = vec![0.0f32; input.len()];
     hp_input(input, &mut out, state);
+    out
+}
+
+/// Zero (numerator b) coefficients — RFC 3951 §4.8 / Appendix A.30
+/// `hpo_zero_coefsTbl`. 65 Hz HP cutoff on the decoder output. The RFC
+/// prints 8 significant digits; we round to the nearest f32 (f32
+/// mantissa is 24 bits ≈ 7.2 sig figs).
+pub const HPO_ZERO_COEFS: [f32; 3] = [0.939_805_8, -1.879_583_4, 0.939_805_8];
+
+/// Pole (denominator a) coefficients — RFC 3951 §4.8 / Appendix A.30
+/// `hpo_pole_coefsTbl`. `a[0] = 1.0` (already normalised). RFC's
+/// `0.93589199` rounds to the nearest representable f32 (`0.935892`).
+pub const HPO_POLE_COEFS: [f32; 3] = [1.0, -1.933_073_5, 0.935_892];
+
+/// Persistent state of the output HP filter (one instance per decoder).
+///
+/// Layout matches the reference encoder's `mem` array: indices 0/1
+/// hold the input delay line, indices 2/3 the output delay line.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HpOutputState {
+    /// `[x(n-1), x(n-2), y(n-1), y(n-2)]` — same layout as the
+    /// reference decoder's `mem` array.
+    pub mem: [f32; 4],
+}
+
+impl HpOutputState {
+    /// Reset the filter to silence (zeros all delay-line samples).
+    pub fn reset(&mut self) {
+        self.mem = [0.0; 4];
+    }
+}
+
+/// Apply the output HP filter to `input`, writing the filtered samples
+/// to `out`. The filter state in `state` is updated in place. `out` and
+/// `input` may alias the same slice.
+///
+/// RFC 3951 §4.8 / Appendix A.30: a Direct-Form-I biquad reproduces the
+/// reference `hpOutput` exactly because the reference is a cascade of
+/// FIR then IIR without intermediate quantisation.
+pub fn hp_output(input: &[f32], out: &mut [f32], state: &mut HpOutputState) {
+    debug_assert_eq!(input.len(), out.len());
+    let b = HPO_ZERO_COEFS;
+    let a = HPO_POLE_COEFS;
+    let mem = &mut state.mem;
+    for (n, &x_n) in input.iter().enumerate() {
+        // All-zero (FIR) section.
+        let z = b[0] * x_n + b[1] * mem[0] + b[2] * mem[1];
+        // All-pole (IIR) section.
+        let y_n = z - a[1] * mem[2] - a[2] * mem[3];
+        // Shift delay lines.
+        mem[1] = mem[0];
+        mem[0] = x_n;
+        mem[3] = mem[2];
+        mem[2] = y_n;
+        out[n] = y_n;
+    }
+}
+
+/// Convenience wrapper: filter `input` into a freshly allocated `Vec`.
+pub fn hp_output_vec(input: &[f32], state: &mut HpOutputState) -> Vec<f32> {
+    let mut out = vec![0.0f32; input.len()];
+    hp_output(input, &mut out, state);
     out
 }
 
@@ -184,5 +264,117 @@ mod tests {
         // bounded by Σ|b_k| ≈ 3.71. The pole filter is stable; output
         // shouldn't grow beyond ~5× input magnitude.
         assert!(max < 5000.0, "output exceeded sane envelope: {max}");
+    }
+
+    // ----- Output HP filter (RFC 3951 §4.8 / Appendix A.30) -----------
+
+    #[test]
+    fn output_dc_is_attenuated() {
+        let dc_zeros_sum = HPO_ZERO_COEFS.iter().sum::<f32>();
+        assert!(
+            dc_zeros_sum.abs() < 1e-3,
+            "expected output zero-coefs to sum to ~0 (DC notch); got {dc_zeros_sum}"
+        );
+        let mut st = HpOutputState::default();
+        let input = vec![1000.0f32; 2000];
+        let out = hp_output_vec(&input, &mut st);
+        let tail = &out[1800..];
+        let max_tail = tail.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+        assert!(
+            max_tail < 20.0,
+            "DC steady-state |y| should be < 20 (~34 dB attenuation); got {max_tail}"
+        );
+    }
+
+    #[test]
+    fn output_high_frequency_passes() {
+        let mut st = HpOutputState::default();
+        let fs = 8000.0f32;
+        let f = 1000.0f32;
+        let n = 4000;
+        let input: Vec<f32> = (0..n)
+            .map(|i| (2.0 * core::f32::consts::PI * f * (i as f32) / fs).sin() * 1000.0)
+            .collect();
+        let out = hp_output_vec(&input, &mut st);
+        let lo = n - 800;
+        let rms_in = (input[lo..].iter().map(|v| v * v).sum::<f32>() / (n - lo) as f32).sqrt();
+        let rms_out = (out[lo..].iter().map(|v| v * v).sum::<f32>() / (n - lo) as f32).sqrt();
+        let ratio = rms_out / rms_in;
+        assert!(
+            ratio > 0.9 && ratio < 1.1,
+            "1 kHz tone amplitude ratio out/in should be ~1; got {ratio}"
+        );
+    }
+
+    /// 30 Hz tone — well below the 65 Hz cutoff — should be attenuated
+    /// by more than 6 dB relative to the input.
+    #[test]
+    fn output_low_frequency_attenuated() {
+        let mut st = HpOutputState::default();
+        let fs = 8000.0f32;
+        let n = 8000;
+        let f = 30.0f32;
+        let input: Vec<f32> = (0..n)
+            .map(|i| (2.0 * core::f32::consts::PI * f * (i as f32) / fs).sin() * 1000.0)
+            .collect();
+        let out = hp_output_vec(&input, &mut st);
+        let lo = n - 1600;
+        let rms_in = (input[lo..].iter().map(|v| v * v).sum::<f32>() / (n - lo) as f32).sqrt();
+        let rms_out = (out[lo..].iter().map(|v| v * v).sum::<f32>() / (n - lo) as f32).sqrt();
+        let ratio = rms_out / rms_in;
+        assert!(
+            ratio < 0.5,
+            "30 Hz tone should be attenuated by > 6 dB; ratio={ratio}"
+        );
+    }
+
+    #[test]
+    fn output_silence_in_silence_out() {
+        let mut st = HpOutputState::default();
+        let input = vec![0.0f32; 1000];
+        let out = hp_output_vec(&input, &mut st);
+        for &v in &out {
+            assert_eq!(v, 0.0);
+        }
+    }
+
+    #[test]
+    fn output_stable_under_square_wave() {
+        let mut st = HpOutputState::default();
+        let n = 4000;
+        let input: Vec<f32> = (0..n)
+            .map(|i| if (i / 40) % 2 == 0 { 1000.0 } else { -1000.0 })
+            .collect();
+        let out = hp_output_vec(&input, &mut st);
+        let max = out.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+        assert!(max < 5000.0, "output exceeded sane envelope: {max}");
+    }
+
+    /// `hp_output` and `hp_output_vec` must agree byte-for-byte (the
+    /// vec helper is a thin wrapper).
+    #[test]
+    fn output_vec_helper_matches_in_place() {
+        let mut st1 = HpOutputState::default();
+        let mut st2 = HpOutputState::default();
+        let n = 2000;
+        let input: Vec<f32> = (0..n).map(|i| (i as f32) * 7.0 - 1000.0).collect();
+        let v1 = hp_output_vec(&input, &mut st1);
+        let mut v2 = vec![0.0f32; n];
+        hp_output(&input, &mut v2, &mut st2);
+        assert_eq!(v1, v2);
+        assert_eq!(st1.mem, st2.mem);
+    }
+
+    /// Reset clears delay-line state so a fresh filter pass on identical
+    /// input matches a freshly-constructed filter.
+    #[test]
+    fn output_reset_clears_state() {
+        let mut st = HpOutputState::default();
+        let warmup = vec![100.0f32; 500];
+        let _ = hp_output_vec(&warmup, &mut st);
+        st.reset();
+        for v in st.mem {
+            assert_eq!(v, 0.0);
+        }
     }
 }

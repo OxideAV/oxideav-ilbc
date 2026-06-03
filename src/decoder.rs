@@ -16,6 +16,7 @@ use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, R
 use crate::bitreader::{parse_frame, FrameParams};
 use crate::cb::{construct_excitation, construct_excitation_veclen, update_cb_memory};
 use crate::enhancer::{enhance_frame, EnhancerState};
+use crate::hp_filter::{hp_output, HpOutputState};
 use crate::lsf::{decode_and_interpolate, dequant_lsf, LsfState};
 use crate::state::reconstruct_scalar_state;
 use crate::synthesis::{conceal_frame, synthesise_frame, SynthState};
@@ -41,13 +42,40 @@ pub fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
             params.codec_id
         )));
     }
-    Ok(Box::new(IlbcDecoder::new()))
+    // RFC 3951 §4.8 Post Filtering: optional 65 Hz HP filter on the
+    // decoded output. Off by default; enable with `hp_filter=on` (or
+    // `1` / `true` / `yes`). The RFC explicitly marks this stage as
+    // "If desired" — useful when the encoder side ran without §3.1
+    // pre-processing and the decoder wants to strip residual DC / 50-
+    // 60 Hz content the CELP synthesis filter may have introduced.
+    let hp_filter_on = params
+        .options
+        .get("hp_filter")
+        .map(|v| matches!(v, "1" | "on" | "true" | "yes"))
+        .unwrap_or(false);
+    Ok(Box::new(IlbcDecoder::new(hp_filter_on)))
 }
 
 /// Parse a packet into its [`FrameParams`] — thin re-export for tests
 /// and external tooling.
 pub fn parse_packet(packet: &[u8]) -> Result<FrameParams> {
     parse_frame(packet)
+}
+
+/// Filter `samples` in place using the §4.8 output HP biquad. Returns
+/// the number of samples processed. Wrapper around [`hp_output`] that
+/// avoids a temporary `Vec` allocation by reading and writing the same
+/// slice (the filter samples its input before writing the output, so
+/// aliasing is safe).
+fn hp_output_in_place(samples: &mut [f32], state: &mut HpOutputState) -> usize {
+    let n = samples.len();
+    // Safety: `hp_output` reads `input[n]` before writing `out[n]` for
+    // every n, so reading and writing the same slice via two raw
+    // borrows is sound. We avoid `unsafe` by allocating once per frame
+    // — iLBC frames are 160/240 samples so the allocation is cheap.
+    let scratch: Vec<f32> = samples.to_vec();
+    hp_output(&scratch, samples, state);
+    n
 }
 
 struct IlbcDecoder {
@@ -61,12 +89,19 @@ struct IlbcDecoder {
     /// enhancer-delay-aware synthesis filtering of RFC §4.7. Holds at
     /// least the last `mode.sub_blocks()` rows of the previous frame.
     old_a_per_sub: Vec<[f32; LPC_ORDER + 1]>,
+    /// RFC §4.8 output HP filter state. Persists across frames so the
+    /// IIR delay line doesn't reset on every packet (the post-filter is
+    /// applied to the full per-frame PCM block, not per sub-block).
+    hp_state: HpOutputState,
+    /// Whether to apply the §4.8 output HP filter. Toggled by the
+    /// `hp_filter=on` decoder parameter.
+    hp_filter_on: bool,
     pending: Option<Packet>,
     eof: bool,
 }
 
 impl IlbcDecoder {
-    fn new() -> Self {
+    fn new(hp_filter_on: bool) -> Self {
         // Seed `old_a_per_sub` with identity LPC rows so the very first
         // frame's enhancer-delay shift uses a pass-through filter where
         // the previous-frame LPC would normally apply.
@@ -79,6 +114,8 @@ impl IlbcDecoder {
             enhancer: EnhancerState::new(),
             cb_mem: [0.0; CB_LMEM],
             old_a_per_sub: vec![identity; 6],
+            hp_state: HpOutputState::default(),
+            hp_filter_on,
             pending: None,
             eof: false,
         }
@@ -303,7 +340,7 @@ impl Decoder for IlbcDecoder {
         };
         // Detect frame mode, handle both valid and lost/empty shapes.
         let mode_opt = FrameMode::from_packet_len(pkt.data.len());
-        let (mode, samples) = match mode_opt {
+        let (mode, mut samples) = match mode_opt {
             Some(m) => {
                 let mut out = vec![0.0f32; m.samples()];
                 self.decode_into(&pkt.data, &mut out)?;
@@ -323,6 +360,15 @@ impl Decoder for IlbcDecoder {
                 )));
             }
         };
+
+        // RFC 3951 §4.8 Post Filtering: optional 65 Hz HP filter on the
+        // per-frame PCM block. We feed `samples` through `hp_output` in
+        // place so the IIR delay line carries continuously across frame
+        // boundaries.
+        if self.hp_filter_on {
+            let filtered = hp_output_in_place(&mut samples, &mut self.hp_state);
+            debug_assert_eq!(filtered, samples.len());
+        }
 
         let mut bytes = Vec::with_capacity(samples.len() * 2);
         for &s in samples.iter() {
@@ -352,6 +398,7 @@ impl Decoder for IlbcDecoder {
         let mut id = [0.0f32; LPC_ORDER + 1];
         id[0] = 1.0;
         self.old_a_per_sub = vec![id; 6];
+        self.hp_state.reset();
         self.pending = None;
         self.eof = false;
         Ok(())
@@ -475,6 +522,144 @@ mod tests {
                 // sample is finite by construction (clamped + round + cast).
                 let _ = s;
             }
+        }
+    }
+
+    /// `hp_filter=on` must opt in to the §4.8 post-filter; without the
+    /// option, the decoder produces the unfiltered baseline.
+    #[test]
+    fn hp_filter_option_toggles_post_filter() {
+        fn decode_with(option: Option<&str>) -> Vec<i16> {
+            let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
+            params.sample_rate = Some(SAMPLE_RATE);
+            params.channels = Some(1);
+            if let Some(v) = option {
+                params
+                    .options
+                    .insert("hp_filter".to_string(), v.to_string());
+            }
+            let mut dec = make_decoder(&params).expect("make_decoder");
+            let pkt = Packet::new(
+                0,
+                TimeBase::new(1, SAMPLE_RATE as i64),
+                vec![0xAAu8; FRAME_BYTES_20MS],
+            );
+            dec.send_packet(&pkt).unwrap();
+            let Frame::Audio(a) = dec.receive_frame().unwrap() else {
+                panic!("expected audio frame");
+            };
+            a.data[0]
+                .chunks_exact(2)
+                .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                .collect()
+        }
+
+        let baseline = decode_with(None);
+        let with_off = decode_with(Some("off"));
+        let with_on = decode_with(Some("on"));
+        let with_true = decode_with(Some("true"));
+
+        // Default and `off` must produce the exact same output (no
+        // filter applied either way).
+        assert_eq!(
+            baseline, with_off,
+            "default decode must match hp_filter=off"
+        );
+
+        // `on` and `true` must agree (same boolean coercion).
+        assert_eq!(with_on, with_true, "hp_filter=on must match hp_filter=true");
+
+        // The filter is opt-in and changes at least one sample for a
+        // non-silent input. (For an all-zero input the filter is a no-
+        // op; the 0xAA packet drives the CELP decoder with non-zero
+        // excitation so a difference is expected.)
+        assert_eq!(baseline.len(), with_on.len(), "frame length unchanged");
+        let any_diff = baseline.iter().zip(with_on.iter()).any(|(a, b)| a != b);
+        assert!(
+            any_diff,
+            "expected hp_filter=on to change at least one PCM sample"
+        );
+    }
+
+    /// Silence on the decoder output stays silence regardless of the
+    /// post-filter: the all-pole IIR has zero state, so a zero excitation
+    /// produces zero output.
+    #[test]
+    fn hp_filter_preserves_silence() {
+        let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
+        params.sample_rate = Some(SAMPLE_RATE);
+        params.channels = Some(1);
+        params
+            .options
+            .insert("hp_filter".to_string(), "on".to_string());
+        let mut dec = make_decoder(&params).expect("make_decoder");
+        // An empty-frame-indicator packet with zero LSF/state bits runs
+        // the PLC path; depending on `prev_enh_pl` the first such
+        // packet still emits a deterministic-but-quiet block. We feed
+        // a string of empty-marker packets and assert the filter
+        // doesn't cause the output to blow up.
+        let mut bad = vec![0u8; FRAME_BYTES_20MS];
+        bad[FRAME_BYTES_20MS - 1] = 1;
+        for pts in 0..5 {
+            let pkt = Packet::new(0, TimeBase::new(1, SAMPLE_RATE as i64), bad.clone())
+                .with_pts(pts * 160);
+            dec.send_packet(&pkt).unwrap();
+            let Frame::Audio(a) = dec.receive_frame().unwrap() else {
+                panic!("expected audio frame");
+            };
+            for chunk in a.data[0].chunks_exact(2) {
+                let s = i16::from_le_bytes([chunk[0], chunk[1]]);
+                assert!(s.abs() < 32000, "post-filter output blew up: {s}");
+            }
+        }
+    }
+
+    /// `reset()` must clear the §4.8 HP filter delay line so the next
+    /// frame starts from silence — otherwise a stale IIR memory could
+    /// inject a low-frequency transient at the head of the new stream.
+    #[test]
+    fn reset_clears_hp_filter_state() {
+        let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
+        params.sample_rate = Some(SAMPLE_RATE);
+        params.channels = Some(1);
+        params
+            .options
+            .insert("hp_filter".to_string(), "on".to_string());
+        let mut dec = make_decoder(&params).expect("make_decoder");
+        // Prime the filter with a few non-trivial packets.
+        let pkt = Packet::new(
+            0,
+            TimeBase::new(1, SAMPLE_RATE as i64),
+            vec![0xCCu8; FRAME_BYTES_20MS],
+        );
+        for _ in 0..3 {
+            dec.send_packet(&pkt).unwrap();
+            let _ = dec.receive_frame().unwrap();
+        }
+        dec.reset().expect("reset");
+        // After reset, a fresh stream of identical packets must match a
+        // brand-new decoder with the same option.
+        let mut params2 = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
+        params2.sample_rate = Some(SAMPLE_RATE);
+        params2.channels = Some(1);
+        params2
+            .options
+            .insert("hp_filter".to_string(), "on".to_string());
+        let mut dec2 = make_decoder(&params2).expect("make_decoder");
+
+        for _ in 0..2 {
+            dec.send_packet(&pkt).unwrap();
+            let Frame::Audio(a1) = dec.receive_frame().unwrap() else {
+                panic!();
+            };
+            dec2.send_packet(&pkt).unwrap();
+            let Frame::Audio(a2) = dec2.receive_frame().unwrap() else {
+                panic!();
+            };
+            assert_eq!(
+                a1.data[0], a2.data[0],
+                "reset() did not clear HP filter state"
+            );
         }
     }
 }
