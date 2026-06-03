@@ -1,9 +1,10 @@
 //! MSB-first bit writer mirroring [`crate::bitreader::BitReader`].
 //!
-//! The writer expects the same flat layout the decoder parses: walk
-//! Table 3.2 top-to-bottom, emitting each parameter's full bit count as a
-//! single contiguous MSB-first field. The final bit is the empty-frame
-//! indicator (bit 303 for 20 ms, bit 399 for 30 ms).
+//! The writer emits the same RFC 3951 §3.8 ULP layout the decoder
+//! parses: three passes per payload, each parameter contributing its
+//! class-N high bits on pass N. Per-parameter widths come from
+//! [`crate::ulp`]. The final bit is the empty-frame indicator
+//! (bit 303 for 20 ms, bit 399 for 30 ms).
 
 use oxideav_core::{Error, Result};
 
@@ -69,88 +70,97 @@ pub struct PackParams {
     pub empty_flag: bool,
 }
 
-/// Pack a frame into its byte payload using the flat layout the decoder
-/// parses.
+/// Pack a frame into its byte payload using the RFC 3951 §3.8 ULP
+/// layout. Field-count validation runs up front; per-class widths
+/// come from [`crate::ulp`].
 pub fn pack_frame(params: &PackParams) -> Result<Vec<u8>> {
     let mode = params.mode;
     let nbytes = match mode {
         FrameMode::Ms20 => FRAME_BYTES_20MS,
         FrameMode::Ms30 => FRAME_BYTES_30MS,
     };
+
+    if params.lsf_idx.len() != mode.lsf_vectors() {
+        return Err(Error::invalid(format!(
+            "iLBC pack: expected {} LSF vectors, got {}",
+            mode.lsf_vectors(),
+            params.lsf_idx.len()
+        )));
+    }
+    if params.state_samples.len() != mode.state_short_len() {
+        return Err(Error::invalid(format!(
+            "iLBC pack: expected {} state samples, got {}",
+            mode.state_short_len(),
+            params.state_samples.len()
+        )));
+    }
+    let expected_sb = mode.cb_sub_blocks();
+    if params.sub_blocks.len() != expected_sb {
+        return Err(Error::invalid(format!(
+            "iLBC pack: expected {} sub-blocks, got {}",
+            expected_sb,
+            params.sub_blocks.len()
+        )));
+    }
+
+    // Build LogicalParams (RFC §3.8 named view of the wire fields)
+    // from the in-tree FrameParams-style PackParams, then run the ULP
+    // emit list through the bit writer.
+    let logical = crate::ulp::LogicalParams {
+        lsf_idx: params
+            .lsf_idx
+            .iter()
+            .flat_map(|row| [row[0] as u32, row[1] as u32, row[2] as u32])
+            .collect(),
+        start: params.block_class as u32,
+        state_first: params.position as u32,
+        idx_for_max: params.scale_idx as u32,
+        state_samples: params.state_samples.iter().map(|v| *v as u32).collect(),
+        extra_cb_index: [
+            params.boundary.cb_idx[0] as u32,
+            params.boundary.cb_idx[1] as u32,
+            params.boundary.cb_idx[2] as u32,
+        ],
+        extra_cb_gain: [
+            params.boundary.gain_idx[0] as u32,
+            params.boundary.gain_idx[1] as u32,
+            params.boundary.gain_idx[2] as u32,
+        ],
+        cb_index: params
+            .sub_blocks
+            .iter()
+            .map(|sb| {
+                [
+                    sb.cb_idx[0] as u32,
+                    sb.cb_idx[1] as u32,
+                    sb.cb_idx[2] as u32,
+                ]
+            })
+            .collect(),
+        cb_gain: params
+            .sub_blocks
+            .iter()
+            .map(|sb| {
+                [
+                    sb.gain_idx[0] as u32,
+                    sb.gain_idx[1] as u32,
+                    sb.gain_idx[2] as u32,
+                ]
+            })
+            .collect(),
+    };
+    let emit_list = crate::ulp::pack_emit_list(mode, &logical, params.empty_flag);
+
     let mut buf = vec![0u8; nbytes];
     {
         let mut bw = BitWriter::new(&mut buf);
-
-        // 1. LSF indices.
-        if params.lsf_idx.len() != mode.lsf_vectors() {
-            return Err(Error::invalid(format!(
-                "iLBC pack: expected {} LSF vectors, got {}",
-                mode.lsf_vectors(),
-                params.lsf_idx.len()
-            )));
+        for (value, width) in emit_list {
+            bw.write(value, width)?;
         }
-        for idx in &params.lsf_idx {
-            bw.write(idx[0] as u32, 6)?;
-            bw.write(idx[1] as u32, 7)?;
-            bw.write(idx[2] as u32, 7)?;
-        }
-        // 2. Block class.
-        let bits_bc = match mode {
-            FrameMode::Ms20 => 2,
-            FrameMode::Ms30 => 3,
-        };
-        bw.write(params.block_class as u32, bits_bc)?;
-        // 3. Position bit.
-        bw.write(params.position as u32, 1)?;
-        // 4. Scale idx (6 bits).
-        bw.write(params.scale_idx as u32, 6)?;
-        // 5. State samples (3 bits each).
-        if params.state_samples.len() != mode.state_short_len() {
-            return Err(Error::invalid(format!(
-                "iLBC pack: expected {} state samples, got {}",
-                mode.state_short_len(),
-                params.state_samples.len()
-            )));
-        }
-        for &s in &params.state_samples {
-            bw.write((s & 0x7) as u32, 3)?;
-        }
-        // 6. Boundary block: 7/7/7 CB, 5/4/3 gain.
-        bw.write(params.boundary.cb_idx[0] as u32, 7)?;
-        bw.write(params.boundary.cb_idx[1] as u32, 7)?;
-        bw.write(params.boundary.cb_idx[2] as u32, 7)?;
-        bw.write(params.boundary.gain_idx[0] as u32, 5)?;
-        bw.write(params.boundary.gain_idx[1] as u32, 4)?;
-        bw.write(params.boundary.gain_idx[2] as u32, 3)?;
-        // 7. Sub-blocks: (8,7,7)/(5,4,3) for sub_block 0 and (8,8,8)/(5,4,3) for later.
-        let expected_sb = mode.cb_sub_blocks();
-        if params.sub_blocks.len() != expected_sb {
-            return Err(Error::invalid(format!(
-                "iLBC pack: expected {} sub-blocks, got {}",
-                expected_sb,
-                params.sub_blocks.len()
-            )));
-        }
-        for (i, sb) in params.sub_blocks.iter().enumerate() {
-            let (w2, w3) = if i == 0 { (7, 7) } else { (8, 8) };
-            bw.write(sb.cb_idx[0] as u32, 8)?;
-            bw.write(sb.cb_idx[1] as u32, w2)?;
-            bw.write(sb.cb_idx[2] as u32, w3)?;
-            bw.write(sb.gain_idx[0] as u32, 5)?;
-            bw.write(sb.gain_idx[1] as u32, 4)?;
-            bw.write(sb.gain_idx[2] as u32, 3)?;
-        }
-        // 8. Padding to (total_bits - 1), then empty-frame indicator.
-        let total_bits = mode.bits();
-        let consumed = bw.bit_position();
-        if consumed >= total_bits {
-            return Err(Error::invalid("iLBC pack: exceeded payload bit budget"));
-        }
-        let padding = total_bits - 1 - consumed;
-        if padding > 0 {
-            bw.write(0, padding as u32)?;
-        }
-        bw.write_bit(params.empty_flag)?;
+        // The emit list packs every payload bit (class 1 + class 2 +
+        // class 3 + empty-frame indicator); the writer should be at
+        // exactly `mode.bits()` here.
+        debug_assert_eq!(bw.bit_position(), mode.bits());
     }
     Ok(buf)
 }

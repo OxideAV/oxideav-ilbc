@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (round 219 — RFC 3951 §3.8 ULP bit layout, drops flat-layout deviation)
+
+- `src/ulp.rs`: new private module hosting `ULP_20MS` / `ULP_30MS`
+  tables (transcribed verbatim from RFC 3951 Appendix A.41
+  `ULP_20msTbl` / `ULP_30msTbl`), a `LogicalParams` struct that names
+  every wire field in the same vocabulary the RFC uses, plus a typed
+  driver `pack_emit_list` / `unpack_logical` that walks the three
+  uneven-level-protection passes (class 1 high bits → class 2 mid
+  bits → class 3 low bits, per RFC §3.8 and Appendix A.42 `unpack` /
+  Appendix A.41 `packsplit` / `packcombine`). The helper exposes a
+  bit-IO-agnostic `FnMut(u32) -> Result<u32>` read interface so the
+  existing `BitReader` / `BitWriter` primitives are reused unchanged.
+- `src/bitreader.rs::parse_frame` rewritten to delegate to
+  `ulp::unpack_logical`. The flat-layout deviation noted in the
+  module docs through r215 is now gone; field semantics now map onto
+  the named RFC variables (`lsf_i` / `start` / `state_first` /
+  `idxForMax` / `idxVec` / `extra_cb_index` / `extra_gain_index` /
+  `cb_index` / `gain_index` / `last_bit`).
+- `src/bitwriter.rs::pack_frame` rewritten symmetrically — the encoder
+  emits the same ULP layout the decoder parses, keeping
+  encoder + decoder self-roundtrip exact at the bit level and
+  matching the FFmpeg-encoded reference fixtures in `docs_corpus`.
+- 3 new unit tests in `src/ulp.rs`
+  (`ulp_widths_sum_to_field_widths` validates every per-parameter
+  ULP row sums to the parameter's documented width across both
+  modes; `split3_round_trips` and `split3_handles_zero_first_class`
+  exercise the per-class split/combine helpers).
+- `tests/trace_validation.rs`: 15-case structural cross-check
+  against the per-fixture `trace.txt` records under
+  `docs/audio/ilbc/fixtures/`. Each test parses the trace, runs the
+  matching `.lbc` / `.bin` payload through `parse_frame`, and
+  asserts the documented `start_subframe` / `state_first` /
+  `scale_factor_idx_ifm` / `trailing_bit` / `LSF_DECODE split_vq` /
+  per-block `(cb_idx, gain_idx)` multiset against the decoded
+  values. The driver covers all 12 mode-keyed fixtures, the three
+  carriage variants of the containerless-vs-rtp-style-pair fixture,
+  and both halves of the mid-stream-mode-transition fixture.
+- Round-trip SNR table (self-encode + self-decode) is unchanged:
+  `roundtrip_sine_20ms` ≈ 23.89 dB, `roundtrip_sine_30ms` ≈
+  28.57 dB, `roundtrip_voiced_20ms` ≈ 25.01 dB,
+  `roundtrip_voiced_30ms` ≈ 27.08 dB (round 23 baselines preserved
+  to within ≤ 0.05 dB). FFmpeg-fixture PSNR floors land
+  considerably tighter against the reference WAV — silence rises
+  from ~74 dB to **94.84 dB** (20 ms) / **96.50 dB** (30 ms),
+  step-impulse from 34.24 dB to **38.94 dB**, mode-30ms-voice-like
+  from 18.97 dB to **21.37 dB**, mode-20ms-voice-like from
+  15.78 dB to **16.86 dB**, transition-part-b from 15.09 dB to
+  **15.93 dB**. Synthetic-tone fixtures shift by < 2.5 dB in
+  either direction (sub-LSB CELP-pipeline drift now uncovered by
+  the corrected bit layout, well inside every per-case PsnrFloor
+  margin); silence on both modes now sample-exact 65-76 % of
+  the time.
+
 ### Added (round 215 — RFC 3951 §4.8 output HP post-filter)
 
 - `src/hp_filter.rs`: new `HpOutputState` + `hp_output` / `hp_output_vec`

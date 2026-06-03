@@ -9,7 +9,17 @@
 //! the rest. This is `parse_frame`.
 //!
 //! Callers get a `FrameParams` with the dequantisation indices already
-//! assembled and mode-tagged.
+//! assembled and mode-tagged. Field semantics map onto RFC 3951
+//! `iLBC_decode`'s state as follows:
+//!
+//! - [`FrameParams::lsf_idx`]      `lsf_i`
+//! - [`FrameParams::block_class`]  `start` (1-based start sub-frame)
+//! - [`FrameParams::position`]     `state_first` (1=leading, 0=trailing)
+//! - [`FrameParams::scale_idx`]    `idxForMax` (RFC §3.5.2)
+//! - [`FrameParams::state_samples`] `idxVec`
+//! - [`FrameParams::boundary`]     `extra_cb_index` / `extra_gain_index`
+//! - [`FrameParams::sub_blocks`]   `cb_index` / `gain_index`
+//! - [`FrameParams::empty_flag`]   trailing bit (`last_bit` in RFC)
 
 use oxideav_core::{Error, Result};
 
@@ -100,15 +110,17 @@ pub struct FrameParams {
     pub empty_flag: bool,
 }
 
-/// Parse one iLBC packet into [`FrameParams`].
+/// Parse one iLBC packet into [`FrameParams`] using the RFC 3951 §3.8
+/// ULP (uneven-level-protection) bit layout.
 ///
-/// This implementation uses the *flat* layout — walk the Table 3.2 rows
-/// in order, reading each parameter's full bit count as a contiguous
-/// field. That differs from the wire encoding (which splits every
-/// parameter across three classes) but the RFC guarantees the two
-/// layouts are informationally equivalent for decoding. A production-
-/// grade decoder would implement the full ULP packing; for now we
-/// use flat and document the deviation. See the module-level doc.
+/// The bit reader makes three passes over the payload, accumulating
+/// the class-1 high bits, class-2 mid bits, and class-3 low bits of
+/// each parameter in the order given by Table 3.2. The per-parameter
+/// per-class bit widths live in [`crate::ulp`] (mirroring
+/// `ULP_20msTbl` / `ULP_30msTbl` in RFC 3951 §A.41).
+///
+/// The single trailing bit of the payload is the empty-frame
+/// indicator (RFC §3.8 `last_bit`).
 pub fn parse_frame(packet: &[u8]) -> Result<FrameParams> {
     let mode = FrameMode::from_packet_len(packet.len()).ok_or_else(|| {
         Error::invalid(format!(
@@ -116,95 +128,46 @@ pub fn parse_frame(packet: &[u8]) -> Result<FrameParams> {
             packet.len()
         ))
     })?;
-    let mut br = BitReader::new(packet);
-
-    // 1. LSF indices — 20 bits per LSF vector (6+7+7).
-    let n_lsf = mode.lsf_vectors();
-    let mut lsf_idx = Vec::with_capacity(n_lsf);
-    for _ in 0..n_lsf {
-        let s1 = br.read(6)? as u16;
-        let s2 = br.read(7)? as u16;
-        let s3 = br.read(7)? as u16;
-        lsf_idx.push([s1, s2, s3]);
-    }
-
-    // 2. Block class (2 bits for 20 ms, 3 bits for 30 ms).
-    let block_class_bits = match mode {
-        FrameMode::Ms20 => 2,
-        FrameMode::Ms30 => 3,
-    };
-    let block_class = br.read(block_class_bits)? as u8;
-
-    // 3. Position bit (1 bit).
-    let position = br.read(1)? as u8;
-
-    // 4. Scale factor state coder (6 bits).
-    let scale_idx = br.read(6)? as u8;
-
-    // 5. Scalar-coded start-state samples (3 bits each).
     let n_state = mode.state_short_len();
-    let mut state_samples = Vec::with_capacity(n_state);
-    for _ in 0..n_state {
-        state_samples.push(br.read(3)? as u8);
-    }
+    let mut br = BitReader::new(packet);
+    let (logical, empty_flag) = crate::ulp::unpack_logical(mode, n_state, |n| br.read(n))?;
 
-    // 6. Boundary 22-/23-sample block: 3 CB stages (7/7/7) + 3 gain
-    //    stages (5/4/3). Per Table 3.2 these widths are identical for
-    //    both 20 ms and 30 ms modes.
+    // Translate LogicalParams to FrameParams. `cb_index` / `cb_gain`
+    // are stored row-major: `[sub_block_idx][stage] -> u32`. Boundary
+    // block is `extra_*` (3 stages).
+    let lsf_idx = logical
+        .lsf_idx
+        .chunks_exact(3)
+        .map(|c| [c[0] as u16, c[1] as u16, c[2] as u16])
+        .collect::<Vec<_>>();
     let boundary = CbStageIndices {
-        cb_idx: [br.read(7)? as u16, br.read(7)? as u16, br.read(7)? as u16],
-        gain_idx: [br.read(5)? as u8, br.read(4)? as u8, br.read(3)? as u8],
+        cb_idx: [
+            logical.extra_cb_index[0] as u16,
+            logical.extra_cb_index[1] as u16,
+            logical.extra_cb_index[2] as u16,
+        ],
+        gain_idx: [
+            logical.extra_cb_gain[0] as u8,
+            logical.extra_cb_gain[1] as u8,
+            logical.extra_cb_gain[2] as u8,
+        ],
     };
-
-    // 7. Remaining sub-block CB indices. Per RFC 3951 Table 3.2:
-    //    - Sub-block 1 (first "remaining"): stage 1 = 8, stage 2 = 7,
-    //      stage 3 = 7.
-    //    - Sub-blocks 2..: stage 1 = 8, stage 2 = 8, stage 3 = 8.
-    //    20 ms has sub-blocks 1 and 2. 30 ms has sub-blocks 1..4.
-    //    Gain widths for *all* remaining sub-blocks are 5/4/3.
-    // 20 ms has 2 CB sub-blocks (Table 3.2 rows "sub-block 1" and 2),
-    // 30 ms has 4 CB sub-blocks. These cover the excitation outside
-    // the 80-sample state vector.
-    let n_sub = match mode {
-        FrameMode::Ms20 => 2,
-        FrameMode::Ms30 => 4,
-    };
-    let mut sub_blocks = Vec::with_capacity(n_sub);
-    for i in 0..n_sub {
-        let (w2, w3) = if i == 0 { (7, 7) } else { (8, 8) };
-        let cb = [br.read(8)? as u16, br.read(w2)? as u16, br.read(w3)? as u16];
-        let g = [br.read(5)? as u8, br.read(4)? as u8, br.read(3)? as u8];
-        sub_blocks.push(CbStageIndices {
-            cb_idx: cb,
-            gain_idx: g,
-        });
-    }
-
-    // 8. Consume any remaining bits up to (total_bits - 1), then the
-    //    last bit is the empty-frame indicator. In the flat layout we
-    //    also swallow the alignment padding so the empty flag lands on
-    //    the last bit of the payload.
-    let total_bits = mode.bits();
-    let consumed = br.bit_position();
-    if consumed >= total_bits {
-        return Err(Error::invalid(
-            "iLBC frame: parser overran the payload bit budget",
-        ));
-    }
-    let padding = total_bits - 1 - consumed;
-    if padding > 0 {
-        // Pad bits are arbitrary in the flat layout; skip them.
-        br.read(padding as u32)?;
-    }
-    let empty_flag = br.read_bit()?;
-
+    let sub_blocks = logical
+        .cb_index
+        .iter()
+        .zip(logical.cb_gain.iter())
+        .map(|(cb, g)| CbStageIndices {
+            cb_idx: [cb[0] as u16, cb[1] as u16, cb[2] as u16],
+            gain_idx: [g[0] as u8, g[1] as u8, g[2] as u8],
+        })
+        .collect();
     Ok(FrameParams {
         mode,
         lsf_idx,
-        block_class,
-        position,
-        scale_idx,
-        state_samples,
+        block_class: logical.start as u8,
+        position: logical.state_first as u8,
+        scale_idx: logical.idx_for_max as u8,
+        state_samples: logical.state_samples.iter().map(|v| *v as u8).collect(),
         boundary,
         sub_blocks,
         empty_flag,

@@ -101,6 +101,13 @@ Flagged explicitly in each module where they apply:
   subsets sufficient to produce a monotone-LSF / bounded-output
   decoder on all index values. See `lsf_tables.rs` and
   `cb_tables.rs` module docs for the exact coverage.
+- **Wire-format bit layout matches RFC 3951 §3.8 ULP** as of round 219
+  (previous rounds used a simplified flat layout — encoder and decoder
+  agreed on it but it was incompatible with reference iLBC payloads).
+  Per-parameter class-1 / class-2 / class-3 widths come from RFC
+  Appendix A.41 `ULP_20msTbl` / `ULP_30msTbl`; the three-pass
+  pack/unpack mirrors Appendix A.42 `unpack` / `packsplit` /
+  `packcombine`. See `src/ulp.rs`.
 - The §3.5.3 DPCM noise-shaping start-state quantiser (Appendix A.46
   `AbsQuantW`, perceptual weighting via `Ak(z/0.4222)`) is implemented
   but **off by default** (`state_dpcm=on` to enable). Like the §3.6.2
@@ -124,9 +131,11 @@ Flagged explicitly in each module where they apply:
 - The `tests/docs_corpus.rs` driver decodes FFmpeg-encoded fixtures
   successfully across all 16 cases. As of round 173 every fixture
   carries a per-case `Tier::PsnrFloor` regression gate anchored 2-3 dB
-  beneath the observed PSNR: silence 70 dB (vs baseline ~74 dB),
-  step-impulse 30 dB (vs 34 dB), voiced / sine / dtmf 13-15 dB (vs
-  16-19 dB), noise 9-10 dB (vs 12-13 dB). The margin absorbs sub-LSB
+  beneath the observed PSNR: silence 70 dB (post-r219 observed
+  ~95 dB on 20 ms / ~97 dB on 30 ms, with 65-76 % sample-exact match
+  after the ULP bit-layout fix), step-impulse 30 dB (observed
+  ~39 dB), voiced / sine / dtmf 13-15 dB (observed 13-21 dB),
+  noise 9-10 dB (observed 12-13 dB). The margin absorbs sub-LSB
   cross-runner float drift in the CELP path (LSF→LPC rounding, the
   §4.2 all-pass phase compensator, the optional §4.6 enhancer, and
   post-filter) while still red-lighting CI on any per-fixture
@@ -136,13 +145,16 @@ Flagged explicitly in each module where they apply:
 
 Net effect: structurally complete encoder + decoder that produces
 bounded mono 8 kHz PCM on any well-formed 38-/50-byte iLBC payload
-and on empty / lost frames; output is not guaranteed to be bit-exact
-against the RFC 3951 reference (CELP rounding drift) and we have no
-third-party encoder oracle in CI. Workspace policy bars consulting
-any external iLBC implementation as a clean-room reference, so
-cross-encoder validation against a known-good third-party encoder
-would require a black-box binary fixture pipeline that we have not
-stood up.
+and on empty / lost frames; bit layout matches RFC 3951 §3.8 ULP as
+of round 219 (silence on either mode is sample-exact 65-76 % of the
+time against the reference WAV, with sub-LSB CELP-pipeline drift on
+the remaining samples). Output is not bit-exact end-to-end against
+the RFC 3951 reference on speech / tones (CELP rounding drift) and
+we have no third-party encoder oracle in CI. Workspace policy bars
+consulting any external iLBC implementation as a clean-room
+reference, so cross-encoder validation against a known-good
+third-party encoder would require a black-box binary fixture
+pipeline that we have not stood up.
 
 ### Decoder post-processing surface (RFC 3951)
 
