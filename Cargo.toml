@@ -45,3 +45,15 @@ harness = false
 [[bench]]
 name = "roundtrip"
 harness = false
+
+# Round 235 bench. Times the RFC 3952 RTP payload pack / depack hot
+# path (`oxideav_ilbc::rtp::{Packetiser, Depacketiser}`) — the
+# transport-layer surface a streaming endpoint pays once per RTP
+# packet. Six scenarios cover the per-mode pack, the per-mode
+# depacketise (borrowed + owned), and a pack -> depack B2BUA-style
+# round-trip. No `docs/` fixtures or external files are read; every
+# input buffer is synthesised in-bench at the per-mode frame width
+# (38 / 50 bytes).
+[[bench]]
+name = "rtp"
+harness = false

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (round 235 — Criterion bench for RFC 3952 RTP pack / depack)
+
+- `benches/rtp.rs`: new Criterion harness that times the RFC 3952
+  RTP payload-format hot path
+  (`oxideav_ilbc::rtp::{Packetiser, Depacketiser}`) — the transport
+  surface a streaming endpoint pays once per RTP packet. Six
+  scenarios cover the per-mode `pack_series` (50 × 38 B / 33 × 50 B,
+  ~1 s of audio at the default 8-frames-per-packet cap), the
+  per-mode `depacketise` (8 × 38 B / 5 × 50 B, one inbound RTP
+  payload), the owned-variant `depacketise_owned` against the
+  same 20 ms input as the borrowed case, and a B2BUA-style
+  `pack_series → depacketise` round-trip on the 50-frame batch.
+  Every input buffer is synthesised in-bench from a deterministic
+  xorshift32 seed; no `docs/` fixtures or external files are read.
+  Initial measurements on an Apple-silicon laptop pin
+  `pack_series` at ~322 ns / 50 frames (20 ms), ~218 ns / 33 frames
+  (30 ms); `depacketise` (borrowed) at ~13 ns / packet for both
+  modes; `depacketise_owned` at ~155 ns / packet (the ~11× gap vs
+  the borrowed variant quantifies the per-frame `Vec<u8>` clone
+  cost a future allocation cleanup could target).
+- `Cargo.toml`: registers the new `[[bench]] name = "rtp"` entry
+  alongside the round-180 `decode` / `encode` / `roundtrip`
+  harnesses.
+
 ### Added (round 226 — RFC 3952 §4.2 outbound SDP fmtp builders)
 
 - `src/rtp.rs`: three new helpers that close the outbound side of the

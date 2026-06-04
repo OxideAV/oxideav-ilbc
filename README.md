@@ -188,21 +188,36 @@ pipeline that we have not stood up.
 ## Benchmarks
 
 Criterion harnesses in `benches/` time the decoder hot path, the
-encoder hot path, and the paired round-trip through the public
-trait surface. Every PCM input is synthesised in-bench from a
-deterministic xorshift32 seed, so the harnesses ship no committed
-fixture files and read nothing under `docs/`.
+encoder hot path, the paired round-trip through the public trait
+surface, and the RFC 3952 RTP packetiser / depacketiser. Every
+input is synthesised in-bench from a deterministic xorshift32
+seed, so the harnesses ship no committed fixture files and read
+nothing under `docs/`.
 
 ```sh
 cargo bench -p oxideav-ilbc --bench decode
 cargo bench -p oxideav-ilbc --bench encode
 cargo bench -p oxideav-ilbc --bench roundtrip
+cargo bench -p oxideav-ilbc --bench rtp
 ```
 
-Each harness covers three scenarios: 20 ms framing × 1 s,
-30 ms framing × 1 s, and 20 ms framing × 3 s (the long clip lets
-the enhancer pitch buffer and the encoder's `prev_a_per_sub`
-carry-over reach steady state).
+The audio harnesses (`decode`, `encode`, `roundtrip`) each cover
+three scenarios: 20 ms framing × 1 s, 30 ms framing × 1 s, and
+20 ms framing × 3 s (the long clip lets the enhancer pitch
+buffer and the encoder's `prev_a_per_sub` carry-over reach steady
+state).
+
+The `rtp` harness covers six scenarios on the RFC 3952 transport
+surface (added round 235): per-mode `pack_series` on a 1 s frame
+batch (50 × 38 B / 33 × 50 B), per-mode `depacketise` on one RTP
+payload (8 × 38 B / 5 × 50 B), the owned-variant
+`depacketise_owned` against the same input as the borrowed 20 ms
+case, and a B2BUA-style `pack_series → depacketise` round-trip on
+a 50-frame batch. Useful when A/B-testing future allocation /
+chunking cleanups in `rtp::{Packetiser, Depacketiser}` — the
+owned-vs-borrowed depacketise pair already pins the per-frame
+`Vec<u8>` clone cost relative to the zero-copy slice walk
+(measured ~11× gap on the 8-frame 20 ms input).
 
 ## Fuzzing
 
