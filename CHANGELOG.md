@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (round 240 — RFC 3952 dropped-frame concealment helpers)
+
+- `src/rtp.rs`: four new methods on `Depacketiser` plus one free
+  function close the gap between an RTP receiver's
+  sequence-number-aware loss detector and the iLBC decoder's RFC
+  3951 §4.5 packet-loss-concealment path.
+  - `Depacketiser::conceal_gap(missing_frames) -> Vec<Vec<u8>>`
+    emits N RFC 3951 §3.8 empty-marker frames sized for the pinned
+    mode. Feeding each to the decoder runs the §4.5 dampened
+    pitch-synchronous concealment one frame at a time, keeping the
+    output PCM stream aligned with the wall-clock duration of the
+    detected gap.
+  - `Depacketiser::concealment_payload(missing_frames) ->
+    Option<Vec<u8>>` returns the same concealment frames as one
+    concatenated `Vec<u8>` (a body `depacketise` splits back into
+    N marker frames). Returns `None` for `missing_frames == 0`
+    because a zero-length payload would otherwise hit the §3
+    "≥1 frame" rejection path.
+  - `Depacketiser::gap_frame_count(gap_packets,
+    frames_per_payload)` converts an RTP sequence-number gap into
+    the iLBC-frame count to conceal, on the steady-state
+    assumption that each missing packet carried the session's
+    typical aggregation (which the caller derives from
+    `Depacketiser::frame_count` on a previous payload).
+  - `Depacketiser::depacketise_with_gap_fill(gap_packets,
+    frames_per_payload, payload)` is the one-shot driver: it
+    prepends `gap_packets × frames_per_payload` empty-marker frames
+    to the depacketised live payload and returns them as one
+    owned `Vec<Vec<u8>>` in time order, ready to feed the decoder.
+  - `rtp_seq_gap(last, now) -> usize` does the 16-bit-wrap-aware
+    RTP sequence-number arithmetic (RFC 3550 §3.3): forward
+    deltas count as "this many packets missing"; in-order /
+    duplicate / backward-jump deltas all collapse to zero (a
+    backward jump is out-of-order delivery, not loss).
+- 12 new unit tests in `src/rtp.rs`
+  (`conceal_gap_emits_n_marker_frames_per_mode`,
+  `concealment_payload_matches_concatenated_marker_frames`,
+  `gap_frame_count_scales_with_steady_aggregation`,
+  `depacketise_with_gap_fill_prefixes_marker_frames`,
+  `depacketise_with_gap_fill_zero_gap_matches_owned_path`,
+  `depacketise_with_gap_fill_rejects_malformed_payload`,
+  `depacketise_with_gap_fill_round_trips_through_decoder_state`,
+  `rtp_seq_gap_in_order_or_duplicate_is_zero`,
+  `rtp_seq_gap_counts_missing_packets`,
+  `rtp_seq_gap_wraps_around_16_bit_boundary`,
+  `rtp_seq_gap_backward_jump_reports_zero`,
+  `rtp_seq_gap_chains_into_depacketiser_with_gap_fill`).
+- 3 new integration tests in
+  `tests/rtp_depacketiser_drives_decoder.rs`
+  (`rtp_gap_fill_drives_decoder_through_n_concealment_frames_20ms`,
+  `rtp_depacketise_with_gap_fill_drives_decoder_end_to_end_30ms`,
+  `rtp_seq_gap_chains_into_gap_fill_with_wraparound`) that drive
+  the helper through the actual decoder, exercising the
+  pre-roll → concealment → live-payload transition on both modes
+  and the 16-bit-wrap sequence-arithmetic chain end-to-end.
+- The gap-fill helper does not introspect any RTP header bytes —
+  it stays inside the post-RTP-header scope the module already
+  documents — and assumes the caller has access to the sequence
+  number and steady-state aggregation. `rtp_seq_gap` exists as
+  the building block for callers that have not stood up their own
+  RTP fixed-header parser.
+
 ### Added (round 235 — Criterion bench for RFC 3952 RTP pack / depack)
 
 - `benches/rtp.rs`: new Criterion harness that times the RFC 3952

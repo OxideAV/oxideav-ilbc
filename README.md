@@ -299,13 +299,27 @@ Covered:
 - **Empty-frame surrogate** — `empty_marker_frame(mode)` yields a
   buffer the decoder treats as "packet lost; run PLC" (RFC 3951
   §3.8 / §4.5 — empty-frame indicator at LSB of the last byte).
+- **Dropped-frame concealment** (round 240) — when an RTP receiver
+  detects a sequence-number gap, the `Depacketiser::conceal_gap`,
+  `Depacketiser::concealment_payload`, and
+  `Depacketiser::depacketise_with_gap_fill` helpers produce the
+  matching number of empty-marker frames to feed the decoder so
+  the output PCM stream stays aligned with the wall-clock duration
+  of the loss. The companion `rtp_seq_gap` free function does the
+  RFC 3550 §3.3 16-bit-wrap-aware sequence-number arithmetic
+  (forward deltas → "missing packets"; in-order, duplicate, and
+  backward jumps collapse to zero).
 
 The depacketiser → decoder handoff is exercised end-to-end by
 `tests/rtp_depacketiser_drives_decoder.rs`: encoder emits 2–5
 frames per scenario, packetiser aggregates them under a per-packet
 cap, depacketiser splits the body back into individual iLBC
 payloads, and the decoder produces the correct `n * 160` or
-`n * 240`-sample PCM stream.
+`n * 240`-sample PCM stream. The round-240 gap-fill helpers are
+covered by three additional integration tests that drive the
+pre-roll → concealment → live-payload transition through the
+decoder on both modes, with one chain through the 16-bit-wrap
+sequence-arithmetic path.
 
 ## Codec id
 

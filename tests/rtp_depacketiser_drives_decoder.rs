@@ -24,7 +24,8 @@ use oxideav_core::{
     TimeBase,
 };
 use oxideav_ilbc::rtp::{
-    detect_mode_from_payload_len, Depacketiser, Packetiser, TS_DELTA_20MS, TS_DELTA_30MS,
+    detect_mode_from_payload_len, rtp_seq_gap, Depacketiser, Packetiser, TS_DELTA_20MS,
+    TS_DELTA_30MS,
 };
 use oxideav_ilbc::{
     decoder, encoder, FrameMode, CODEC_ID_STR, FRAME_BYTES_20MS, FRAME_BYTES_30MS,
@@ -217,4 +218,138 @@ fn rtp_length_only_mode_detection_picks_clean_30ms_payloads() {
         detect_mode_from_payload_len(body.len()),
         Some(FrameMode::Ms30),
     );
+}
+
+#[test]
+fn rtp_gap_fill_drives_decoder_through_n_concealment_frames_20ms() {
+    // Pre-roll 2 real frames so the synthesis state has a non-zero
+    // RMS / LPC for the PLC unit to extrapolate from (RFC 3951 §4.5
+    // dampens the previous-frame energy). Then drop 3 packets at one
+    // frame each, then deliver 2 more real frames. The decoder must
+    // produce the right per-frame PCM count throughout, with no
+    // panic across the concealment ↔ live transition.
+    let warmup = encode_n_frames(FrameMode::Ms20, 2);
+    let live = encode_n_frames(FrameMode::Ms20, 2);
+
+    let dk = Depacketiser::new(FrameMode::Ms20);
+
+    // Wire-shaped pre-roll body (2 packets × 1 frame each, since we
+    // model frames_per_payload = 1 for the gap).
+    let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
+    params.sample_rate = Some(SAMPLE_RATE);
+    params.channels = Some(1);
+    params.sample_format = Some(SampleFormat::S16);
+    let mut dec = decoder::make_decoder(&params).expect("make_decoder");
+    let tb = TimeBase::new(1, SAMPLE_RATE as i64);
+    let mut pts: i64 = 0;
+    let mut total_samples = 0usize;
+
+    let feed = |dec: &mut dyn oxideav_core::Decoder,
+                pts: &mut i64,
+                total_samples: &mut usize,
+                f: &[u8]| {
+        let pkt = Packet::new(0, tb, f.to_vec()).with_pts(*pts);
+        *pts += 1;
+        dec.send_packet(&pkt).expect("send_packet");
+        match dec.receive_frame().expect("receive_frame") {
+            Frame::Audio(a) => {
+                *total_samples += a.samples as usize;
+                assert_eq!(a.samples as usize, FRAME_SAMPLES_20MS);
+            }
+            other => panic!("non-audio frame: {other:?}"),
+        }
+    };
+
+    for f in &warmup {
+        feed(&mut *dec, &mut pts, &mut total_samples, f);
+    }
+    // Gap of 3 packets at 1 frame per payload.
+    let gap = dk.gap_frame_count(3, 1);
+    assert_eq!(gap, 3);
+    for f in dk.conceal_gap(gap) {
+        feed(&mut *dec, &mut pts, &mut total_samples, &f);
+    }
+    // Live frames resume.
+    for f in &live {
+        feed(&mut *dec, &mut pts, &mut total_samples, f);
+    }
+
+    // 2 warmup + 3 concealed + 2 live = 7 frames × 160 samples.
+    assert_eq!(total_samples, 7 * FRAME_SAMPLES_20MS);
+}
+
+#[test]
+fn rtp_depacketise_with_gap_fill_drives_decoder_end_to_end_30ms() {
+    // 1 warmup payload (1 frame), then a 2-packet gap with the
+    // session running at 2 frames per payload (so 4 concealment
+    // frames), then a 2-frame live payload. Drive everything through
+    // a single decoder.
+    let warmup = encode_n_frames(FrameMode::Ms30, 1);
+    let live = encode_n_frames(FrameMode::Ms30, 2);
+
+    let dk = Depacketiser::new(FrameMode::Ms30);
+
+    let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
+    params.sample_rate = Some(SAMPLE_RATE);
+    params.channels = Some(1);
+    params.sample_format = Some(SampleFormat::S16);
+    let mut dec = decoder::make_decoder(&params).expect("make_decoder");
+    let tb = TimeBase::new(1, SAMPLE_RATE as i64);
+    let mut pts: i64 = 0;
+    let mut total_samples = 0usize;
+
+    // Warmup: 1 frame.
+    {
+        let pkt = Packet::new(0, tb, warmup[0].clone()).with_pts(pts);
+        pts += 1;
+        dec.send_packet(&pkt).expect("send_packet");
+        let frame = dec.receive_frame().expect("receive_frame");
+        if let Frame::Audio(a) = frame {
+            total_samples += a.samples as usize;
+            assert_eq!(a.samples as usize, FRAME_SAMPLES_30MS);
+        } else {
+            panic!("non-audio frame from warmup");
+        }
+    }
+
+    // Live payload aggregates 2 frames.
+    let live_body: Vec<u8> = live.iter().flatten().copied().collect();
+    let gap_then_live = dk
+        .depacketise_with_gap_fill(2, 2, &live_body)
+        .expect("gap fill");
+    // 2 missing × 2 frames-per-payload + 2 live = 6 frames.
+    assert_eq!(gap_then_live.len(), 6);
+
+    for f in &gap_then_live {
+        let pkt = Packet::new(0, tb, f.clone()).with_pts(pts);
+        pts += 1;
+        dec.send_packet(&pkt).expect("send_packet");
+        let frame = dec.receive_frame().expect("receive_frame");
+        if let Frame::Audio(a) = frame {
+            total_samples += a.samples as usize;
+            assert_eq!(a.samples as usize, FRAME_SAMPLES_30MS);
+        } else {
+            panic!("non-audio frame in gap-fill stream");
+        }
+    }
+
+    // 1 warmup + 4 concealed + 2 live = 7 × 240 samples.
+    assert_eq!(total_samples, 7 * FRAME_SAMPLES_30MS);
+}
+
+#[test]
+fn rtp_seq_gap_chains_into_gap_fill_with_wraparound() {
+    // Wrap-around RTP sequence numbers: last=65530, now=2 → gap = 7
+    // missing packets. At 1 frame per payload, that's 7 concealment
+    // frames before the live payload's single frame.
+    let dk = Depacketiser::new(FrameMode::Ms20);
+    let live = encode_n_frames(FrameMode::Ms20, 1);
+    let gap = rtp_seq_gap(65_530, 2);
+    let frames = dk
+        .depacketise_with_gap_fill(gap, 1, &live[0])
+        .expect("gap fill");
+    assert_eq!(frames.len(), gap + 1);
+
+    let total = decode_through(&frames, FrameMode::Ms20);
+    assert_eq!(total, (gap + 1) * FRAME_SAMPLES_20MS);
 }

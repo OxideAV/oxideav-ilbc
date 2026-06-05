@@ -157,6 +157,138 @@ impl Depacketiser {
             .map(|s| s.to_vec())
             .collect())
     }
+
+    /// Emit `missing_frames` empty-marker frames sized for this
+    /// depacketiser's mode. Each frame is the buffer produced by
+    /// [`empty_marker_frame`] (all-zero except the LSB of the last
+    /// byte). Feeding these to the decoder advances the PLC path one
+    /// frame at a time (RFC 3951 §3.8 empty-frame indicator → §4.5
+    /// dampened pitch-synchronous concealment), so the output PCM
+    /// stream stays aligned with the wall-clock duration the gap
+    /// represented.
+    ///
+    /// Returns an empty `Vec` when `missing_frames == 0` (a vacuous
+    /// "no gap" call is fine — the typical caller passes the result
+    /// of [`Self::gap_frame_count`] which can legitimately be zero).
+    pub fn conceal_gap(&self, missing_frames: usize) -> Vec<Vec<u8>> {
+        (0..missing_frames)
+            .map(|_| empty_marker_frame(self.mode))
+            .collect()
+    }
+
+    /// Concatenated form of [`Self::conceal_gap`]: emits one
+    /// `Vec<u8>` of `missing_frames × frame_size` bytes that
+    /// [`Self::depacketise`] would split back into individual
+    /// empty-marker frames. Useful when the caller plans to drive the
+    /// gap fill through the same decode path as a normal RTP body
+    /// (one call to `depacketise`, then iterate the frames).
+    ///
+    /// Returns `None` when `missing_frames == 0` — a zero-length
+    /// payload is a `depacketise` rejection per RFC 3952 §3, so
+    /// callers handle the no-gap case by skipping the call.
+    pub fn concealment_payload(&self, missing_frames: usize) -> Option<Vec<u8>> {
+        if missing_frames == 0 {
+            return None;
+        }
+        let fs = self.frame_size();
+        let mut out = vec![0u8; missing_frames * fs];
+        // Place the empty-frame indicator at the LSB of each frame's
+        // final byte (RFC 3951 §3.8).
+        for k in 0..missing_frames {
+            out[(k + 1) * fs - 1] = 0x01;
+        }
+        Some(out)
+    }
+
+    /// Translate an RTP sequence-number gap into the iLBC-frame count
+    /// the gap represented, assuming each missing packet carried
+    /// `frames_per_payload` frames (a common steady-state
+    /// invariant — RFC 3952 §3 makes no per-packet header surface
+    /// that would let the receiver introspect the lost packets, so
+    /// the typical sender uses a constant aggregation through the
+    /// session).
+    ///
+    /// `gap_packets` is the number of *missing* RTP packets, computed
+    /// upstream from the RTP fixed-header sequence-number delta
+    /// (`seq_now - seq_last - 1`, with 16-bit wrap handled by the
+    /// caller). `frames_per_payload` is most usefully the value
+    /// [`Self::frame_count`] reported on the most recently received
+    /// payload — that derivation is exposed on [`Self`] so a caller
+    /// can chain `frame_count(last_payload.len())` straight into
+    /// `gap_frame_count`.
+    ///
+    /// A `frames_per_payload` of 0 yields 0 — a defensive guard so a
+    /// post-restart caller that has not yet observed a payload (and
+    /// therefore cannot know the steady-state aggregation) does not
+    /// over-conceal.
+    pub fn gap_frame_count(&self, gap_packets: usize, frames_per_payload: usize) -> usize {
+        gap_packets.saturating_mul(frames_per_payload)
+    }
+
+    /// One-shot helper that produces the full "concealment then
+    /// payload" frame list a decoder driver feeds the iLBC decoder
+    /// when an RTP packet arrives after a gap.
+    ///
+    /// `gap_packets` is the number of missing RTP packets the caller
+    /// detected (typically `seq_now - seq_last - 1` with 16-bit wrap
+    /// handled by [`rtp_seq_gap`]). `frames_per_payload` is the
+    /// steady-state aggregation the session is using; pass the result
+    /// of [`Self::frame_count`] on a previously-received payload.
+    /// `payload` is the newly-arrived RTP body (post-RTP-header
+    /// bytes).
+    ///
+    /// Returns a `Vec` containing first the gap-fill empty-marker
+    /// frames (in time order) and then the depacketised frames from
+    /// `payload`. Rejects `payload` for the same reasons as
+    /// [`Self::depacketise`] — empty or not a multiple of the
+    /// per-mode frame size.
+    pub fn depacketise_with_gap_fill(
+        &self,
+        gap_packets: usize,
+        frames_per_payload: usize,
+        payload: &[u8],
+    ) -> Result<Vec<Vec<u8>>> {
+        let live = self.depacketise_owned(payload)?;
+        let missing = self.gap_frame_count(gap_packets, frames_per_payload);
+        if missing == 0 {
+            return Ok(live);
+        }
+        let mut out = Vec::with_capacity(missing + live.len());
+        out.extend(self.conceal_gap(missing));
+        out.extend(live);
+        Ok(out)
+    }
+}
+
+/// Difference between two 16-bit RTP sequence numbers, accounting for
+/// the 65 536-element circular space defined by RFC 3550 §3.3.
+/// Returns the number of *missing* sequence numbers strictly between
+/// `last` and `now` (i.e. `(now - last - 1) mod 2^16`, interpreted
+/// as the shorter of the two arc directions on the circle).
+///
+/// The convention treats deltas larger than `2^15` as backward jumps
+/// (out-of-order delivery or a deliberate sequence reset) and reports
+/// `0` for them — concealing a frame for a packet that arrived early
+/// would lower output quality with no upside. Callers that want to
+/// react to backward jumps should compare `last` and `now` directly
+/// before calling this helper.
+///
+/// Returns `0` when `now == last` (duplicate) or `now == last + 1`
+/// (in-order delivery, no gap).
+pub fn rtp_seq_gap(last: u16, now: u16) -> usize {
+    let delta = now.wrapping_sub(last) as i32;
+    // Wrap delta into signed 16-bit space: values in (2^15, 2^16) are
+    // backward jumps.
+    let signed = if delta >= 0x8000 {
+        delta - 0x1_0000
+    } else {
+        delta
+    };
+    if signed <= 1 {
+        0
+    } else {
+        (signed - 1) as usize
+    }
 }
 
 /// Build an RTP payload from one or more iLBC frames.
@@ -789,5 +921,178 @@ mod tests {
                 assert_eq!(dk.mode(), m);
             }
         }
+    }
+
+    // ----- dropped-frame concealment helpers -----
+
+    #[test]
+    fn conceal_gap_emits_n_marker_frames_per_mode() {
+        for (mode, fs) in [
+            (FrameMode::Ms20, FRAME_BYTES_20MS),
+            (FrameMode::Ms30, FRAME_BYTES_30MS),
+        ] {
+            let dk = Depacketiser::new(mode);
+            for n in [0_usize, 1, 3, 8] {
+                let frames = dk.conceal_gap(n);
+                assert_eq!(frames.len(), n, "mode={mode:?} n={n}");
+                for f in &frames {
+                    assert_eq!(f.len(), fs);
+                    // Last byte LSB set, every other byte zero (RFC 3951 §3.8).
+                    assert_eq!(*f.last().unwrap(), 0x01);
+                    for b in &f[..f.len() - 1] {
+                        assert_eq!(*b, 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn concealment_payload_matches_concatenated_marker_frames() {
+        for mode in [FrameMode::Ms20, FrameMode::Ms30] {
+            let dk = Depacketiser::new(mode);
+            // Zero-gap shortcut returns None.
+            assert!(dk.concealment_payload(0).is_none());
+
+            for n in [1_usize, 2, 5] {
+                let payload = dk.concealment_payload(n).expect("non-empty for n>=1");
+                let split = dk.depacketise_owned(&payload).unwrap();
+                assert_eq!(split.len(), n);
+                let expected = dk.conceal_gap(n);
+                assert_eq!(split, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn gap_frame_count_scales_with_steady_aggregation() {
+        let dk = Depacketiser::new(FrameMode::Ms20);
+        assert_eq!(dk.gap_frame_count(0, 4), 0);
+        assert_eq!(dk.gap_frame_count(3, 0), 0);
+        assert_eq!(dk.gap_frame_count(1, 1), 1);
+        assert_eq!(dk.gap_frame_count(2, 4), 8);
+        // Saturating multiplication avoids overflow panics for
+        // pathologically large inputs.
+        assert_eq!(dk.gap_frame_count(usize::MAX, 8), usize::MAX);
+    }
+
+    #[test]
+    fn depacketise_with_gap_fill_prefixes_marker_frames() {
+        let dk = Depacketiser::new(FrameMode::Ms20);
+        let live = vec![0xAAu8; 2 * FRAME_BYTES_20MS];
+        // 2 missing packets at 2 frames each → 4 PLC frames + 2 live.
+        let frames = dk.depacketise_with_gap_fill(2, 2, &live).unwrap();
+        assert_eq!(frames.len(), 6);
+        // First four are empty-marker frames (LSB of last byte set,
+        // every other byte zero).
+        for f in &frames[..4] {
+            assert_eq!(f.len(), FRAME_BYTES_20MS);
+            assert_eq!(*f.last().unwrap(), 0x01);
+            for b in &f[..f.len() - 1] {
+                assert_eq!(*b, 0);
+            }
+        }
+        // Last two are the live payload.
+        for f in &frames[4..] {
+            assert_eq!(f.len(), FRAME_BYTES_20MS);
+            assert_eq!(f[0], 0xAA);
+        }
+    }
+
+    #[test]
+    fn depacketise_with_gap_fill_zero_gap_matches_owned_path() {
+        let dk = Depacketiser::new(FrameMode::Ms30);
+        let live = vec![0x55u8; 3 * FRAME_BYTES_30MS];
+        let with_gap = dk.depacketise_with_gap_fill(0, 1, &live).unwrap();
+        let no_gap = dk.depacketise_owned(&live).unwrap();
+        assert_eq!(with_gap, no_gap);
+        // Zero frames-per-payload also degenerates cleanly.
+        let with_zero = dk.depacketise_with_gap_fill(5, 0, &live).unwrap();
+        assert_eq!(with_zero, no_gap);
+    }
+
+    #[test]
+    fn depacketise_with_gap_fill_rejects_malformed_payload() {
+        let dk = Depacketiser::new(FrameMode::Ms20);
+        // Empty payload — same rejection rule as depacketise.
+        assert!(dk.depacketise_with_gap_fill(1, 1, &[]).is_err());
+        // Wrong-mode size.
+        let bad = vec![0u8; FRAME_BYTES_30MS];
+        assert!(dk.depacketise_with_gap_fill(1, 1, &bad).is_err());
+    }
+
+    #[test]
+    fn depacketise_with_gap_fill_round_trips_through_decoder_state() {
+        // The gap-fill output is contiguous concealment frames followed by
+        // the live payload's frames in time order — concretely, splitting
+        // the concatenated bytes through depacketise again yields the
+        // same frame list.
+        let dk = Depacketiser::new(FrameMode::Ms20);
+        let live = vec![0xC3u8; 2 * FRAME_BYTES_20MS];
+        let frames = dk.depacketise_with_gap_fill(3, 2, &live).unwrap();
+        let concat: Vec<u8> = frames.iter().flatten().copied().collect();
+        // 3 gap × 2 frames + 2 live = 8 frames × 38 bytes = 304 bytes.
+        assert_eq!(concat.len(), 8 * FRAME_BYTES_20MS);
+        let re = dk.depacketise_owned(&concat).unwrap();
+        assert_eq!(re, frames);
+    }
+
+    // ----- RTP sequence-number gap arithmetic -----
+
+    #[test]
+    fn rtp_seq_gap_in_order_or_duplicate_is_zero() {
+        assert_eq!(rtp_seq_gap(100, 101), 0); // in-order
+        assert_eq!(rtp_seq_gap(100, 100), 0); // duplicate
+    }
+
+    #[test]
+    fn rtp_seq_gap_counts_missing_packets() {
+        assert_eq!(rtp_seq_gap(100, 102), 1);
+        assert_eq!(rtp_seq_gap(100, 105), 4);
+        assert_eq!(rtp_seq_gap(0, 1000), 999);
+    }
+
+    #[test]
+    fn rtp_seq_gap_wraps_around_16_bit_boundary() {
+        // last=65530, now=5 → wrapped delta = 11, gap = 10.
+        assert_eq!(rtp_seq_gap(65_530, 5), 10);
+        // last=65535, now=0 → in-order across wrap.
+        assert_eq!(rtp_seq_gap(65_535, 0), 0);
+        // last=65535, now=1 → 1 missing.
+        assert_eq!(rtp_seq_gap(65_535, 1), 1);
+    }
+
+    #[test]
+    fn rtp_seq_gap_backward_jump_reports_zero() {
+        // Out-of-order delivery: now < last by less than the wrap
+        // midpoint → backward jump → no concealment.
+        assert_eq!(rtp_seq_gap(100, 50), 0);
+        // A backward jump of 1 position (re-ordered duplicate of the
+        // previous packet) also reports zero.
+        assert_eq!(rtp_seq_gap(1_000, 999), 0);
+        // A wrap-aware backward jump (last just past the wrap, now
+        // just before it) — `now - last` mod 2^16 is in the upper
+        // half, which the RFC 3550 wrap convention classifies as
+        // out-of-order rather than a near-complete-roll forward.
+        assert_eq!(rtp_seq_gap(5, 65_000), 0);
+    }
+
+    #[test]
+    fn rtp_seq_gap_chains_into_depacketiser_with_gap_fill() {
+        let dk = Depacketiser::new(FrameMode::Ms20);
+        let last_seq = 65_534_u16;
+        let now_seq = 1_u16; // wraps; gap = 2 missing packets.
+        let gap = rtp_seq_gap(last_seq, now_seq);
+        assert_eq!(gap, 2);
+
+        let live = vec![0x77u8; FRAME_BYTES_20MS];
+        let frames = dk.depacketise_with_gap_fill(gap, 1, &live).unwrap();
+        // 2 missing × 1 frame/payload + 1 live = 3 total.
+        assert_eq!(frames.len(), 3);
+        // First two are empty-marker, third is the live payload.
+        for f in &frames[..2] {
+            assert_eq!(*f.last().unwrap(), 0x01);
+        }
+        assert_eq!(frames[2][0], 0x77);
     }
 }
