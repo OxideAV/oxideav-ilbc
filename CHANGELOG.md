@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (round 243 — focused libFuzzer target for the RFC 3952 §4.2 SDP `fmtp` parser)
+
+- `fuzz/fuzz_targets/sdp_fmtp.rs` + `fuzz/Cargo.toml`: new
+  `sdp_fmtp` `cargo-fuzz` target. Companion to the round-204
+  `rtp_depacketise` target, which threads only a length-prefixed
+  slice of its input into `parse_mode_from_fmtp` (the rest goes
+  to the depacketise body). Splitting the parser onto its own
+  iteration budget lets libFuzzer spend its whole budget
+  exploring the `;`-separated `key=value` grammar of the
+  RFC 3952 §4.2 `mode=20|30` parameter list. Hands the entire
+  fuzz input to `parse_mode_from_fmtp` as the SDP `a=fmtp:<pt>
+  ...` value via `String::from_utf8_lossy` (the parser only
+  takes `&str`; the lossy bridge keeps every byte sequence the
+  caller could realistically present).
+- Invariants asserted on every iteration:
+  - [`parse_mode_from_fmtp`] is panic-free for any `&str` (its
+    return value is one of `Ok(FrameMode::Ms20)`,
+    `Ok(FrameMode::Ms30)`, or `Err(Error::Invalid)`);
+  - [`Depacketiser::from_sdp_fmtp`] agrees with
+    `parse_mode_from_fmtp` on the accept / reject decision and
+    pins the same mode when both accept;
+  - on any accepted `mode`, [`format_mode_fmtp`] emits the bare
+    `mode=20` / `mode=30` token, [`build_fmtp(mode, None)`] emits
+    the same bare token, and every emission round-trips through
+    `parse_mode_from_fmtp` back to the same `FrameMode`;
+  - the cap ladder `{ Some(0), Some(1), Some(2), Some(8),
+    Some(255) }` for [`build_fmtp`] respects the documented
+    emission shape — cap ≤ 1 collapses to the bare token (a
+    `maxptime` equal to one per-frame `ptime` is a no-op);
+    cap > 1 emits `;maxptime=<cap * frame_duration_ms(mode)>`.
+- Locally-staged 9-file seed corpus at `fuzz/corpus/sdp_fmtp/`
+  (kept out of git per the existing `fuzz/.gitignore corpus`
+  line, matching the round-204 convention) gives libFuzzer a
+  curated head-start across the happy path (`mode=20`,
+  `mode=30`, `mode=30;maxptime=60`,
+  `ptime=20;mode=20;maxptime=240`), the case-insensitive key
+  matcher (`MODE=30`), leading / trailing / internal whitespace
+  (` mode = 20 `), the bad-value reject path (`mode=40`), the
+  missing-`mode` reject path (`ptime=20`), and the zero-length
+  edge case (empty string).
+- `fuzz/Cargo.toml`: registers the `[[bin]] name = "sdp_fmtp"`
+  entry alongside `decode` / `encode_roundtrip` /
+  `rtp_depacketise`; the module-level doc block bumps the target
+  count from three to four and documents the parser-only
+  attacker surface.
+- `README.md`: `## Fuzzing` section grows a fourth bullet
+  documenting the new target and the cap ladder it exercises.
+
 ### Added (round 240 — RFC 3952 dropped-frame concealment helpers)
 
 - `src/rtp.rs`: four new methods on `Depacketiser` plus one free

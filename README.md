@@ -229,6 +229,7 @@ invariants on arbitrary fuzz-supplied bytes:
 cargo +nightly fuzz run decode
 cargo +nightly fuzz run encode_roundtrip
 cargo +nightly fuzz run rtp_depacketise
+cargo +nightly fuzz run sdp_fmtp
 ```
 
 - **`decode`** — drives raw byte payloads through the §3.8 bit-reader,
@@ -254,11 +255,24 @@ cargo +nightly fuzz run rtp_depacketise
   `Depacketiser::depacketise` round-trip preserves the original
   frame list and emits monotone-non-decreasing per-packet RTP
   timestamps.
+- **`sdp_fmtp`** (round 243) — focused companion to `rtp_depacketise`
+  that hands the *entire* fuzz input to `parse_mode_from_fmtp` as
+  the SDP `a=fmtp:<pt> ...` value. `rtp_depacketise` threads only a
+  length-prefixed slice of its input into the parser (the rest is
+  the depacketise body); splitting the parser onto its own iteration
+  budget lets libFuzzer spend its whole budget exploring the
+  `;`-separated `key=value` grammar of RFC 3952 §4.2. Asserts
+  panic-freedom on every byte sequence, that
+  `Depacketiser::from_sdp_fmtp` agrees with `parse_mode_from_fmtp`
+  on the accept / reject decision, and that every accepted mode
+  round-trips through `format_mode_fmtp` and `build_fmtp`
+  (`{ None, Some(0), Some(1), Some(2), Some(8), Some(255) }` cap
+  ladder) back to the same `FrameMode`.
 
 The targets share `oxideav-ilbc-fuzz` as a nested workspace
 (`fuzz/Cargo.toml`) so the umbrella's `crates/*` glob does not pull
 them in. Workspace policy bars consulting any external iLBC
-implementation as a cross-decode oracle, so the three targets cover
+implementation as a cross-decode oracle, so the four targets cover
 the attacker surface end-to-end without an external comparison.
 
 ## RTP payload format (RFC 3952)

@@ -53,9 +53,20 @@ cargo-fuzz = true
 # invariants (per-frame length == mode.bytes(), reconstitution byte-
 # for-byte equality, timestamp monotonicity) on every iteration.
 #
+# SDP fmtp parser (`sdp_fmtp`): a focused companion to `rtp_depacketise`
+# that hands the entire fuzz input to `parse_mode_from_fmtp` as the
+# `a=fmtp:<pt> ...` value. The `rtp_depacketise` target threads only a
+# length-prefixed slice of its input into the fmtp parser (the rest is
+# the depacketise body); splitting the parser onto its own iteration
+# budget lets libFuzzer explore the `;`-separated `key=value` grammar
+# of RFC 3952 §4.2 much deeper. Asserts panic-freedom on every byte
+# sequence, parse / `Depacketiser::from_sdp_fmtp` accept/reject
+# agreement, and round-trip equality through `format_mode_fmtp` /
+# `build_fmtp` on every accepted mode.
+#
 # There is no external library worth pulling in as a cross-decode
 # oracle — workspace policy bars consulting any external iLBC
-# implementation as a clean-room reference. The three targets cover
+# implementation as a clean-room reference. The four targets cover
 # the attacker surface end-to-end.
 [dependencies]
 libfuzzer-sys = "0.4"
@@ -96,5 +107,16 @@ doc = false
 [[bin]]
 name = "rtp_depacketise"
 path = "fuzz_targets/rtp_depacketise.rs"
+test = false
+doc = false
+
+# Focused SDP `fmtp` parser target. Splits the parser surface out of
+# `rtp_depacketise` (which had to share its input budget between an
+# fmtp slice and a depacketise body) so libFuzzer can spend its whole
+# iteration budget exploring the `;`-separated `key=value` grammar of
+# the iLBC fmtp parameter list.
+[[bin]]
+name = "sdp_fmtp"
+path = "fuzz_targets/sdp_fmtp.rs"
 test = false
 doc = false
