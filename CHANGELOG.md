@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (round 246 — focused libFuzzer target for the RFC 3952 RTP gap-fill / packet-loss-concealment surface)
+
+- `fuzz/fuzz_targets/rtp_gap_fill.rs` + `fuzz/Cargo.toml`: new
+  `rtp_gap_fill` `cargo-fuzz` target. Focused companion to the
+  round-204 `rtp_depacketise` target, which spends its iteration
+  budget on the SDP fmtp slice + the `Packetiser::pack_series` ↔
+  `Depacketiser::depacketise` round-trip and leaves the round-240
+  dropped-frame helpers (`rtp_seq_gap`,
+  `Depacketiser::gap_frame_count`,
+  `Depacketiser::conceal_gap`,
+  `Depacketiser::concealment_payload`,
+  `Depacketiser::depacketise_with_gap_fill`) unexplored. Splitting
+  them onto their own target lets libFuzzer drive the
+  16-bit RTP sequence-number arc fold (RFC 3550 §3.3 numbering, signed
+  arc; > 2^15 = backward jump → 0), the saturating multiplication
+  edge of `gap_packets * frames_per_payload`, the
+  `frames_per_payload == 0` defensive guard (no observation yet ⇒ 0
+  concealment frames), the RFC 3951 §3.8 empty-frame-indicator
+  placement on every emitted concealment slice (LSB of the final
+  byte set, all other bytes zero), and the
+  `depacketise(body) ↔ depacketise_with_gap_fill` accept-decision
+  parity (the gap-fill helper rejects iff the live body fails the
+  per-mode "positive multiple of `frame_size`" contract).
+- Invariants asserted on every iteration:
+  - [`rtp_seq_gap`] is panic-free for any `(last, now)` `u16` pair
+    and the returned gap is bounded above by `0x7FFF` (the signed-arc
+    fold ceiling). The diagonal `now == last` and the in-order step
+    `now == last + 1` both yield `0`;
+  - [`Depacketiser::gap_frame_count`] equals
+    `gap_packets.saturating_mul(frames_per_payload)`, saturates to
+    `usize::MAX` on the boundary, and collapses to `0` whenever
+    `frames_per_payload == 0`;
+  - [`Depacketiser::conceal_gap(n)`] returns exactly `n` frames each
+    of `mode.bytes()` length and each byte-equal to
+    `empty_marker_frame(mode)`;
+  - [`Depacketiser::concealment_payload(n)`] is `Some(body)` for
+    `n >= 1` and `None` for `n == 0`; the body has length `n * fs`,
+    every per-mode chunk carries the empty-frame indicator at its
+    LSB, and `depacketise(body)` yields `n` slices that compare
+    byte-equal to the per-frame `conceal_gap` template;
+  - [`Depacketiser::depacketise_with_gap_fill`] mirrors
+    [`Depacketiser::depacketise`] on the live body's accept / reject
+    decision; on accept, the returned `Vec` has exactly
+    `missing + live_count` frames, the first `missing` are
+    empty-markers, and the trailing `live_count` reproduce the input
+    body slice-by-slice in order; on reject, the body really is
+    empty or not a multiple of `mode.bytes()`.
+- 1024-frame ceiling on the per-iteration concealment count
+  (`FUZZ_MISSING_FRAMES_CAP`) keeps the harness inside libFuzzer's
+  iteration budget even on adversarial seeds whose
+  `(gap_packets, frames_per_payload)` product would otherwise
+  request multi-megabyte concealment buffers. The production
+  helpers are unbounded; the cap exists only inside the fuzz
+  harness.
+- `fuzz/Cargo.toml`: registers the `[[bin]] name = "rtp_gap_fill"`
+  entry alongside `decode` / `encode_roundtrip` / `rtp_depacketise`
+  / `sdp_fmtp`; the module-level doc block bumps the target count
+  from four to five and documents the gap-fill attacker surface
+  the new target carves off.
+- `README.md`: `## Fuzzing` section grows a fifth bullet documenting
+  the new target and the invariants it pins, and the `cargo +nightly
+  fuzz run` listing learns the new entry point. The closing summary
+  flips from "the four targets cover the attacker surface
+  end-to-end" to "the five targets cover the attacker surface
+  end-to-end".
+
 ### Added (round 243 — focused libFuzzer target for the RFC 3952 §4.2 SDP `fmtp` parser)
 
 - `fuzz/fuzz_targets/sdp_fmtp.rs` + `fuzz/Cargo.toml`: new

@@ -64,10 +64,23 @@ cargo-fuzz = true
 # agreement, and round-trip equality through `format_mode_fmtp` /
 # `build_fmtp` on every accepted mode.
 #
-# There is no external library worth pulling in as a cross-decode
-# oracle — workspace policy bars consulting any external iLBC
-# implementation as a clean-room reference. The four targets cover
-# the attacker surface end-to-end.
+# RTP gap-fill / concealment (`rtp_gap_fill`): a focused companion to
+# `rtp_depacketise` that exercises the round-240 dropped-frame helpers
+# — `rtp_seq_gap`, `Depacketiser::gap_frame_count`,
+# `Depacketiser::conceal_gap`, `Depacketiser::concealment_payload`,
+# `Depacketiser::depacketise_with_gap_fill`. The `rtp_depacketise`
+# target threads its input through `pack_series` / `depacketise`
+# round-trips with shape-constrained frame slices, leaving the
+# arithmetic helpers and the concealment-frame emission path
+# unexplored. Splitting them onto a dedicated iteration budget lets
+# libFuzzer hit the 16-bit sequence-number arc fold, the saturating
+# multiplication boundary on `(gap_packets, frames_per_payload)`, the
+# RFC 3951 §3.8 empty-frame indicator placement on every emitted
+# concealment slice, and the `depacketise(body) ↔ depacketise_with_gap_fill`
+# accept-decision parity.
+#
+# The four prior targets plus this fifth one cover the attacker
+# surface end-to-end.
 [dependencies]
 libfuzzer-sys = "0.4"
 # `oxideav-core` carries the `Decoder` / `Encoder` traits and the
@@ -118,5 +131,20 @@ doc = false
 [[bin]]
 name = "sdp_fmtp"
 path = "fuzz_targets/sdp_fmtp.rs"
+test = false
+doc = false
+
+# Focused RTP gap-fill / packet-loss-concealment target. Splits the
+# round-240 helpers (`rtp_seq_gap`, `Depacketiser::gap_frame_count`,
+# `Depacketiser::conceal_gap`, `Depacketiser::concealment_payload`,
+# `Depacketiser::depacketise_with_gap_fill`) out of `rtp_depacketise`
+# (whose input budget was already absorbed by the SDP fmtp slice plus
+# the packetiser round-trip) so libFuzzer can spend its whole
+# iteration budget on the dropped-frame / sequence-number-gap surface
+# and the empty-frame-indicator placement contract on every emitted
+# concealment slice.
+[[bin]]
+name = "rtp_gap_fill"
+path = "fuzz_targets/rtp_gap_fill.rs"
 test = false
 doc = false

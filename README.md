@@ -230,6 +230,7 @@ cargo +nightly fuzz run decode
 cargo +nightly fuzz run encode_roundtrip
 cargo +nightly fuzz run rtp_depacketise
 cargo +nightly fuzz run sdp_fmtp
+cargo +nightly fuzz run rtp_gap_fill
 ```
 
 - **`decode`** — drives raw byte payloads through the §3.8 bit-reader,
@@ -268,11 +269,25 @@ cargo +nightly fuzz run sdp_fmtp
   round-trips through `format_mode_fmtp` and `build_fmtp`
   (`{ None, Some(0), Some(1), Some(2), Some(8), Some(255) }` cap
   ladder) back to the same `FrameMode`.
+- **`rtp_gap_fill`** (round 246) — focused companion to
+  `rtp_depacketise` that exercises the round-240 dropped-frame
+  helpers (`rtp_seq_gap`, `Depacketiser::gap_frame_count`,
+  `Depacketiser::conceal_gap`, `Depacketiser::concealment_payload`,
+  `Depacketiser::depacketise_with_gap_fill`). Splits them onto a
+  dedicated iteration budget so libFuzzer can spend its whole
+  budget on the 16-bit RTP sequence-number arc fold, the saturating
+  multiplication of `gap_packets * frames_per_payload`, the
+  RFC 3951 §3.8 empty-frame-indicator placement on every emitted
+  concealment slice, and the `depacketise(body) ↔
+  depacketise_with_gap_fill` accept-decision parity. A 1024-frame
+  cap on the per-iteration concealment count keeps the harness
+  inside libFuzzer's iteration budget even on adversarial
+  `(gap_packets, frames_per_payload)` pairs.
 
 The targets share `oxideav-ilbc-fuzz` as a nested workspace
 (`fuzz/Cargo.toml`) so the umbrella's `crates/*` glob does not pull
 them in. Workspace policy bars consulting any external iLBC
-implementation as a cross-decode oracle, so the four targets cover
+implementation as a cross-decode oracle, so the five targets cover
 the attacker surface end-to-end without an external comparison.
 
 ## RTP payload format (RFC 3952)
