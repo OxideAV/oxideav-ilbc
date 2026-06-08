@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (round 258 — RFC 3952 §4.2 / RFC 4566 §6 inbound `ptime` / `maxptime` parsers and `max_frames_per_packet` derivation)
+
+- `src/rtp.rs`: three new free functions close the inbound mirror of
+  the round-226 `build_fmtp` `;maxptime=M` emission, so an iLBC
+  receiver can drive a `Packetiser` cap straight from an incoming
+  SDP `a=fmtp:<pt> ...` value.
+  - `parse_ptime_from_fmtp(fmtp_value) -> Option<u32>` extracts the
+    optional `ptime=<ms>` parameter (RFC 4566 §6 — the sender's
+    typical per-packet packetisation time in ms). Returns `None`
+    when the parameter is absent or carries a non-numeric value;
+    matches the parameter key case-insensitively and trims
+    whitespace, same shape as the round-200 `parse_mode_from_fmtp`
+    grammar.
+  - `parse_maxptime_from_fmtp(fmtp_value) -> Option<u32>` is the
+    same shape for `maxptime=<ms>` (RFC 4566 §6 — the session-level
+    upper bound on packetisation time).
+  - `max_frames_per_packet_from_fmtp(fmtp_value, mode) -> Option<usize>`
+    derives a `Packetiser` cap from the parsed `maxptime` (preferred
+    when both are present) or `ptime` (fallback). Returns `None`
+    when neither is advertised so the caller can use its own default
+    (the bare `Packetiser::new` picks 8). A cap smaller than one
+    per-frame `ptime` clamps to 1 — a degenerate sub-frame SDP
+    still has to emit one whole iLBC frame per packet.
+- Both parsers share a private `parse_named_u32` helper, keeping the
+  `;`-separated `key=value` walk in one place.
+- 15 new unit tests in `src/rtp.rs` (`parse_ptime_extracts_integer_value`,
+  `parse_ptime_is_case_insensitive_on_key`,
+  `parse_ptime_returns_none_when_missing_or_non_numeric`,
+  `parse_ptime_trims_whitespace`,
+  `parse_maxptime_extracts_integer_value`,
+  `parse_maxptime_is_case_insensitive_and_trims`,
+  `parse_maxptime_returns_none_when_missing_or_non_numeric`,
+  `parse_named_u32_skips_pieces_without_equals`,
+  `max_frames_per_packet_from_fmtp_prefers_maxptime`,
+  `max_frames_per_packet_from_fmtp_falls_back_to_ptime`,
+  `max_frames_per_packet_from_fmtp_prefers_maxptime_over_ptime_when_both_present`,
+  `max_frames_per_packet_from_fmtp_returns_none_when_neither_advertised`,
+  `max_frames_per_packet_from_fmtp_clamps_subframe_caps_to_one`,
+  `build_fmtp_round_trips_through_max_frames_per_packet`,
+  `max_frames_per_packet_from_fmtp_drives_a_packetiser_cap`). The
+  round-trip test pins the outbound→inbound parity with the
+  round-226 `build_fmtp` emission across both modes and the
+  `{ Some(2), Some(3), Some(4), Some(8), Some(16) }` cap ladder; a
+  cap of `Some(1)` emits a bare `mode=N` (no `;maxptime=`) and the
+  inbound side reports `None`, so the caller falls back to its own
+  default. The end-to-end consumer test drives the parsed cap into a
+  `Packetiser::with_max_frames_per_packet` and confirms the
+  `pack_series` chunking obeys the advertised aggregation (9 × 20 ms
+  frames at the parsed cap of 4 → 3 packets of 4 + 4 + 1).
+
 ### Added (round 246 — focused libFuzzer target for the RFC 3952 RTP gap-fill / packet-loss-concealment surface)
 
 - `fuzz/fuzz_targets/rtp_gap_fill.rs` + `fuzz/Cargo.toml`: new

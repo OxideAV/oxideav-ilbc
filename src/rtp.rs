@@ -493,6 +493,96 @@ pub fn format_mode_fmtp(mode: FrameMode) -> String {
     format!("mode={}", frame_duration_ms(mode))
 }
 
+/// Parse the SDP `a=fmtp:<pt> ...` value and extract the optional
+/// `ptime=<ms>` parameter (RFC 4566 §6 — packetisation time in
+/// milliseconds). Returns `None` when the parameter is absent or
+/// carries a non-numeric value; matches the parameter key
+/// case-insensitively.
+///
+/// RFC 4566 §6 defines `ptime` as a session-level attribute that the
+/// sender uses to advertise the typical per-packet duration. For an
+/// iLBC session it is normally an integer multiple of
+/// [`frame_duration_ms`] (20 or 30); a value that is not a multiple
+/// is still returned verbatim — the caller decides whether to coerce
+/// it to a frame boundary.
+///
+/// The mirror of the outbound emission in [`build_fmtp`], which only
+/// emits `maxptime`; `ptime` is here for receivers that want to read
+/// the sender's preferred typical aggregation alongside the
+/// `maxptime` cap.
+pub fn parse_ptime_from_fmtp(fmtp_value: &str) -> Option<u32> {
+    parse_named_u32(fmtp_value, "ptime")
+}
+
+/// Parse the SDP `a=fmtp:<pt> ...` value and extract the optional
+/// `maxptime=<ms>` parameter (RFC 4566 §6 — maximum per-packet
+/// packetisation time in milliseconds). Returns `None` when the
+/// parameter is absent or carries a non-numeric value; matches the
+/// parameter key case-insensitively.
+///
+/// This is the inbound counterpart of [`build_fmtp`]'s
+/// `;maxptime=M` emission: an outbound `build_fmtp(mode, Some(N))`
+/// emits `;maxptime=N * frame_duration_ms(mode)`, and this parser
+/// recovers that same value from an incoming `fmtp` line.
+pub fn parse_maxptime_from_fmtp(fmtp_value: &str) -> Option<u32> {
+    parse_named_u32(fmtp_value, "maxptime")
+}
+
+/// Derive the per-packet frame cap a [`Packetiser`] should honour for
+/// an iLBC RTP session described by the supplied `fmtp` value. The
+/// derivation prefers `maxptime` (the session-level upper bound) over
+/// `ptime` (the typical packet size); a `maxptime` of zero or a
+/// `maxptime` smaller than one per-frame `ptime` collapses to a cap
+/// of 1.
+///
+/// Returns `None` when neither `ptime` nor `maxptime` is present, so
+/// the caller can fall back to its own default (the bare
+/// [`Packetiser::new`] picks 8 frames per packet). When at least one
+/// is present, the returned cap is always at least 1 — even on a
+/// degenerate SDP that pins a sub-frame duration.
+///
+/// The supplied `mode` MUST match the one parsed from the same
+/// `fmtp_value` (callers normally read `parse_mode_from_fmtp` first
+/// and pass the parsed mode here); the cap is computed as
+/// `cap_ms / frame_duration_ms(mode)`.
+pub fn max_frames_per_packet_from_fmtp(fmtp_value: &str, mode: FrameMode) -> Option<usize> {
+    let frame_ms = frame_duration_ms(mode);
+    debug_assert!(frame_ms > 0, "frame_duration_ms is constant 20/30");
+    let cap_ms = parse_maxptime_from_fmtp(fmtp_value).or_else(|| parse_ptime_from_fmtp(fmtp_value));
+    cap_ms.map(|ms| {
+        // floor(cap_ms / frame_ms) clamped to >=1 — a maxptime smaller
+        // than one per-frame ptime is technically degenerate (a single
+        // frame already exceeds the advertised cap) but the most
+        // useful behaviour for a receiver-side Packetiser is to emit
+        // one frame per packet rather than refuse the SDP outright.
+        ((ms / frame_ms) as usize).max(1)
+    })
+}
+
+/// Shared parameter-extraction helper for [`parse_ptime_from_fmtp`]
+/// and [`parse_maxptime_from_fmtp`]. Walks the `;`-separated
+/// `key=value` grammar with the same trimming and case-insensitive
+/// key matching as [`parse_mode_from_fmtp`], returns the value of the
+/// first matching key parsed as a `u32`, or `None` when the key is
+/// absent or the value does not parse.
+fn parse_named_u32(fmtp_value: &str, key: &str) -> Option<u32> {
+    for piece in fmtp_value.split(';') {
+        let piece = piece.trim();
+        if piece.is_empty() {
+            continue;
+        }
+        let (k, v) = match piece.split_once('=') {
+            Some(kv) => kv,
+            None => continue,
+        };
+        if !k.trim().eq_ignore_ascii_case(key) {
+            continue;
+        }
+        return v.trim().parse::<u32>().ok();
+    }
+    None
+}
+
 /// Emit the body (everything after the `a=fmtp:<pt> ` token) of an
 /// outbound SDP `fmtp` attribute pinning the iLBC session to the
 /// supplied mode and optional per-packet aggregation cap.
@@ -921,6 +1011,178 @@ mod tests {
                 assert_eq!(dk.mode(), m);
             }
         }
+    }
+
+    // ----- inbound ptime / maxptime parsing -----
+
+    #[test]
+    fn parse_ptime_extracts_integer_value() {
+        assert_eq!(parse_ptime_from_fmtp("mode=20;ptime=20"), Some(20));
+        assert_eq!(parse_ptime_from_fmtp("ptime=30;mode=30"), Some(30));
+        // Aggregated session.
+        assert_eq!(
+            parse_ptime_from_fmtp("mode=20;ptime=40;maxptime=80"),
+            Some(40),
+        );
+    }
+
+    #[test]
+    fn parse_ptime_is_case_insensitive_on_key() {
+        assert_eq!(parse_ptime_from_fmtp("PTIME=20"), Some(20));
+        assert_eq!(parse_ptime_from_fmtp("Ptime=30"), Some(30));
+    }
+
+    #[test]
+    fn parse_ptime_returns_none_when_missing_or_non_numeric() {
+        assert_eq!(parse_ptime_from_fmtp(""), None);
+        assert_eq!(parse_ptime_from_fmtp("mode=20"), None);
+        assert_eq!(parse_ptime_from_fmtp("ptime=fast"), None);
+        // Negative numbers are rejected — `u32` parse fails.
+        assert_eq!(parse_ptime_from_fmtp("ptime=-20"), None);
+    }
+
+    #[test]
+    fn parse_ptime_trims_whitespace() {
+        assert_eq!(parse_ptime_from_fmtp(" ptime = 40 ; mode=30"), Some(40));
+    }
+
+    #[test]
+    fn parse_maxptime_extracts_integer_value() {
+        assert_eq!(parse_maxptime_from_fmtp("mode=20;maxptime=80"), Some(80));
+        assert_eq!(parse_maxptime_from_fmtp("maxptime=240;mode=30"), Some(240));
+    }
+
+    #[test]
+    fn parse_maxptime_is_case_insensitive_and_trims() {
+        assert_eq!(parse_maxptime_from_fmtp("MAXPTIME=120"), Some(120));
+        assert_eq!(
+            parse_maxptime_from_fmtp("mode=30 ; MaxPtime = 60 "),
+            Some(60),
+        );
+    }
+
+    #[test]
+    fn parse_maxptime_returns_none_when_missing_or_non_numeric() {
+        assert_eq!(parse_maxptime_from_fmtp(""), None);
+        assert_eq!(parse_maxptime_from_fmtp("mode=20"), None);
+        assert_eq!(parse_maxptime_from_fmtp("maxptime=long"), None);
+    }
+
+    #[test]
+    fn parse_named_u32_skips_pieces_without_equals() {
+        // Bare token (no `=`) → silently skipped per the
+        // parse_mode_from_fmtp grammar; the named lookup still finds
+        // the subsequent key=value piece.
+        assert_eq!(parse_ptime_from_fmtp("annexb;mode=20;ptime=20"), Some(20),);
+        assert_eq!(parse_maxptime_from_fmtp(";;maxptime=80;"), Some(80));
+    }
+
+    // ----- inbound max-frames-per-packet derivation -----
+
+    #[test]
+    fn max_frames_per_packet_from_fmtp_prefers_maxptime() {
+        // maxptime=160 / 20 ms = 8 frames per packet on a 20 ms session.
+        assert_eq!(
+            max_frames_per_packet_from_fmtp("mode=20;maxptime=160", FrameMode::Ms20),
+            Some(8),
+        );
+        // maxptime=120 / 30 ms = 4 frames per packet.
+        assert_eq!(
+            max_frames_per_packet_from_fmtp("mode=30;maxptime=120", FrameMode::Ms30),
+            Some(4),
+        );
+    }
+
+    #[test]
+    fn max_frames_per_packet_from_fmtp_falls_back_to_ptime() {
+        // Only ptime is advertised: treat as the cap so the receiver
+        // packetiser matches the sender's typical packet size.
+        assert_eq!(
+            max_frames_per_packet_from_fmtp("mode=20;ptime=40", FrameMode::Ms20),
+            Some(2),
+        );
+        assert_eq!(
+            max_frames_per_packet_from_fmtp("mode=30;ptime=90", FrameMode::Ms30),
+            Some(3),
+        );
+    }
+
+    #[test]
+    fn max_frames_per_packet_from_fmtp_prefers_maxptime_over_ptime_when_both_present() {
+        // ptime advertises 40 ms (2 frames @ 20 ms) but maxptime allows
+        // 160 ms (8 frames). The cap is the upper bound, so 8.
+        assert_eq!(
+            max_frames_per_packet_from_fmtp("mode=20;ptime=40;maxptime=160", FrameMode::Ms20,),
+            Some(8),
+        );
+    }
+
+    #[test]
+    fn max_frames_per_packet_from_fmtp_returns_none_when_neither_advertised() {
+        assert_eq!(
+            max_frames_per_packet_from_fmtp("mode=20", FrameMode::Ms20),
+            None,
+        );
+        assert_eq!(max_frames_per_packet_from_fmtp("", FrameMode::Ms30), None);
+    }
+
+    #[test]
+    fn max_frames_per_packet_from_fmtp_clamps_subframe_caps_to_one() {
+        // maxptime smaller than one per-frame duration is degenerate —
+        // the receiver still has to emit one whole iLBC frame per
+        // packet, so the cap clamps to 1.
+        assert_eq!(
+            max_frames_per_packet_from_fmtp("mode=20;maxptime=10", FrameMode::Ms20),
+            Some(1),
+        );
+        assert_eq!(
+            max_frames_per_packet_from_fmtp("mode=30;maxptime=0", FrameMode::Ms30),
+            Some(1),
+        );
+        // ptime fallback honours the same clamp.
+        assert_eq!(
+            max_frames_per_packet_from_fmtp("mode=30;ptime=10", FrameMode::Ms30),
+            Some(1),
+        );
+    }
+
+    #[test]
+    fn build_fmtp_round_trips_through_max_frames_per_packet() {
+        // The inbound derivation recovers the outbound build_fmtp cap
+        // exactly for every cap > 1 — the round-trip parity that makes
+        // a B2BUA's "echo the cap back" path straightforward.
+        for mode in [FrameMode::Ms20, FrameMode::Ms30] {
+            for cap in [2usize, 3, 4, 8, 16] {
+                let s = build_fmtp(mode, Some(cap));
+                let got = max_frames_per_packet_from_fmtp(&s, mode);
+                assert_eq!(got, Some(cap), "fmtp={s:?} mode={mode:?} cap={cap}");
+            }
+            // Cap of 1 emits a bare `mode=N` (no maxptime), so the
+            // inbound side reports None and the caller falls back to
+            // its own default.
+            let s_bare = build_fmtp(mode, Some(1));
+            assert_eq!(max_frames_per_packet_from_fmtp(&s_bare, mode), None);
+        }
+    }
+
+    #[test]
+    fn max_frames_per_packet_from_fmtp_drives_a_packetiser_cap() {
+        // The downstream consumer pattern: parse the mode, derive the
+        // per-packet cap, build a Packetiser, and pack a series.
+        let fmtp = "mode=20;maxptime=80";
+        let mode = parse_mode_from_fmtp(fmtp).unwrap();
+        let cap = max_frames_per_packet_from_fmtp(fmtp, mode).expect("maxptime present");
+        let pkt = Packetiser::with_max_frames_per_packet(mode, cap);
+        assert_eq!(pkt.max_frames_per_packet(), 4);
+
+        // 9 frames at cap=4 → 3 packets sized 4 + 4 + 1.
+        let frame = vec![0u8; FRAME_BYTES_20MS];
+        let frames: Vec<&[u8]> = (0..9).map(|_| frame.as_slice()).collect();
+        let series = pkt.pack_series(&frames).unwrap();
+        assert_eq!(series.len(), 3);
+        assert_eq!(series[0].0.len(), 4 * FRAME_BYTES_20MS);
+        assert_eq!(series[1].0.len(), 4 * FRAME_BYTES_20MS);
+        assert_eq!(series[2].0.len(), FRAME_BYTES_20MS);
     }
 
     // ----- dropped-frame concealment helpers -----

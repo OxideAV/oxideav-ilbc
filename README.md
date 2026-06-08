@@ -338,6 +338,18 @@ Covered:
   RFC 3550 §3.3 16-bit-wrap-aware sequence-number arithmetic
   (forward deltas → "missing packets"; in-order, duplicate, and
   backward jumps collapse to zero).
+- **Inbound `ptime` / `maxptime`** (round 258) — the
+  `parse_ptime_from_fmtp` and `parse_maxptime_from_fmtp` free
+  functions extract the optional RFC 4566 §6 `ptime` /
+  `maxptime` parameters from an inbound `fmtp` line, and
+  `max_frames_per_packet_from_fmtp(fmtp_value, mode)` derives a
+  `Packetiser` per-packet cap straight from the parsed values
+  (prefers `maxptime` over `ptime` when both are present;
+  clamps degenerate sub-frame caps to 1). Closes the inbound
+  mirror of the round-226 `build_fmtp` `;maxptime=M` emission:
+  `build_fmtp(mode, Some(N))` round-trips through
+  `max_frames_per_packet_from_fmtp(..., mode)` back to `N` for
+  any `N >= 2`.
 
 The depacketiser → decoder handoff is exercised end-to-end by
 `tests/rtp_depacketiser_drives_decoder.rs`: encoder emits 2–5
