@@ -610,6 +610,69 @@ pub fn build_fmtp(mode: FrameMode, max_frames_per_packet: Option<usize>) -> Stri
     out
 }
 
+/// Emit the body of an outbound SDP `fmtp` attribute pinning the iLBC
+/// session to `mode` and advertising both the *typical* per-packet
+/// aggregation (`ptime`, RFC 4566 §6) and the per-packet upper bound
+/// (`maxptime`). This is the outbound mirror of
+/// [`parse_ptime_from_fmtp`] + [`parse_maxptime_from_fmtp`]: the value
+/// emitted here recovers the same `(ptime, maxptime)` pair when read
+/// back through those parsers.
+///
+/// Both aggregation arguments are expressed in **frames** (the same
+/// vocabulary as [`Packetiser::with_max_frames_per_packet`] and
+/// [`max_frames_per_packet_from_fmtp`]), and are converted to the
+/// millisecond units SDP carries via [`frame_duration_ms`].
+///
+/// Emission rules, matching the round-226 [`build_fmtp`] conventions
+/// while adding the `ptime` arm:
+///
+/// * `mode=N` is always emitted first.
+/// * `ptime=<ms>` is emitted whenever `ptime_frames` is `Some(p)` with
+///   `p >= 1`. Unlike `maxptime`, a `ptime` of one whole frame is a
+///   meaningful advertisement (it tells the receiver the sender
+///   normally emits one frame per packet), so it is *not* collapsed
+///   away — RFC 4566 §6 treats `ptime` as the sender's preferred
+///   packet duration regardless of how it compares to a single frame.
+/// * `maxptime=<ms>` is emitted whenever `maxptime_frames` is
+///   `Some(m)` with `m > 1`, identical to [`build_fmtp`].
+/// * When both are emitted, `ptime` is clamped to never exceed
+///   `maxptime` (RFC 4566 §6: the typical aggregation cannot exceed
+///   the advertised maximum). A `ptime_frames` larger than
+///   `maxptime_frames` is silently lowered to the cap rather than
+///   producing a self-contradictory SDP line.
+///
+/// Parameters are emitted in the canonical order `mode;ptime;maxptime`.
+pub fn build_fmtp_with_ptime(
+    mode: FrameMode,
+    ptime_frames: Option<usize>,
+    maxptime_frames: Option<usize>,
+) -> String {
+    let frame_ms = frame_duration_ms(mode);
+    let mut out = format_mode_fmtp(mode);
+
+    // Resolve the maxptime cap first so the ptime arm can clamp to it.
+    let maxptime_ms =
+        maxptime_frames.and_then(|m| (m > 1).then(|| (m as u32).saturating_mul(frame_ms)));
+
+    if let Some(p) = ptime_frames {
+        if p >= 1 {
+            let mut ptime_ms = (p as u32).saturating_mul(frame_ms);
+            // RFC 4566 §6: the typical packetisation time must not
+            // exceed the advertised maximum.
+            if let Some(cap_ms) = maxptime_ms {
+                ptime_ms = ptime_ms.min(cap_ms);
+            }
+            out.push_str(&format!(";ptime={ptime_ms}"));
+        }
+    }
+
+    if let Some(cap_ms) = maxptime_ms {
+        out.push_str(&format!(";maxptime={cap_ms}"));
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1183,6 +1246,135 @@ mod tests {
         assert_eq!(series[0].0.len(), 4 * FRAME_BYTES_20MS);
         assert_eq!(series[1].0.len(), 4 * FRAME_BYTES_20MS);
         assert_eq!(series[2].0.len(), FRAME_BYTES_20MS);
+    }
+
+    // ----- outbound ptime emission (build_fmtp_with_ptime) -----
+
+    #[test]
+    fn build_fmtp_with_ptime_emits_bare_mode_when_no_aggregation() {
+        assert_eq!(
+            build_fmtp_with_ptime(FrameMode::Ms20, None, None),
+            "mode=20",
+        );
+        assert_eq!(
+            build_fmtp_with_ptime(FrameMode::Ms30, None, None),
+            "mode=30",
+        );
+    }
+
+    #[test]
+    fn build_fmtp_with_ptime_emits_ptime_in_ms() {
+        // ptime advertised alone: one whole frame is still meaningful
+        // (unlike maxptime, which collapses a cap of 1).
+        assert_eq!(
+            build_fmtp_with_ptime(FrameMode::Ms20, Some(1), None),
+            "mode=20;ptime=20",
+        );
+        assert_eq!(
+            build_fmtp_with_ptime(FrameMode::Ms30, Some(1), None),
+            "mode=30;ptime=30",
+        );
+        // 2 × 20 ms = 40 ms, 3 × 30 ms = 90 ms.
+        assert_eq!(
+            build_fmtp_with_ptime(FrameMode::Ms20, Some(2), None),
+            "mode=20;ptime=40",
+        );
+        assert_eq!(
+            build_fmtp_with_ptime(FrameMode::Ms30, Some(3), None),
+            "mode=30;ptime=90",
+        );
+    }
+
+    #[test]
+    fn build_fmtp_with_ptime_emits_both_in_canonical_order() {
+        // mode;ptime;maxptime. 2 × 20 ms ptime, 8 × 20 ms maxptime.
+        assert_eq!(
+            build_fmtp_with_ptime(FrameMode::Ms20, Some(2), Some(8)),
+            "mode=20;ptime=40;maxptime=160",
+        );
+        assert_eq!(
+            build_fmtp_with_ptime(FrameMode::Ms30, Some(2), Some(4)),
+            "mode=30;ptime=60;maxptime=120",
+        );
+    }
+
+    #[test]
+    fn build_fmtp_with_ptime_keeps_maxptime_only_when_no_ptime() {
+        // maxptime arm matches build_fmtp exactly when ptime is absent.
+        assert_eq!(
+            build_fmtp_with_ptime(FrameMode::Ms20, None, Some(4)),
+            build_fmtp(FrameMode::Ms20, Some(4)),
+        );
+        assert_eq!(
+            build_fmtp_with_ptime(FrameMode::Ms30, None, Some(8)),
+            build_fmtp(FrameMode::Ms30, Some(8)),
+        );
+        // A maxptime cap of 1 collapses away, same as build_fmtp.
+        assert_eq!(
+            build_fmtp_with_ptime(FrameMode::Ms20, None, Some(1)),
+            "mode=20",
+        );
+    }
+
+    #[test]
+    fn build_fmtp_with_ptime_clamps_ptime_to_maxptime() {
+        // RFC 4566 §6: the typical aggregation cannot exceed the
+        // advertised maximum. ptime=8 frames (160 ms) but maxptime
+        // caps at 4 frames (80 ms) → ptime lowered to 80 ms.
+        assert_eq!(
+            build_fmtp_with_ptime(FrameMode::Ms20, Some(8), Some(4)),
+            "mode=20;ptime=80;maxptime=80",
+        );
+        // Equal frames → equal ms, no clamp needed.
+        assert_eq!(
+            build_fmtp_with_ptime(FrameMode::Ms30, Some(4), Some(4)),
+            "mode=30;ptime=120;maxptime=120",
+        );
+    }
+
+    #[test]
+    fn build_fmtp_with_ptime_round_trips_through_inbound_parsers() {
+        // The emitted value recovers the same (mode, ptime, maxptime)
+        // through the round-258 inbound parsers across both modes and a
+        // ladder of frame counts.
+        for mode in [FrameMode::Ms20, FrameMode::Ms30] {
+            let frame_ms = frame_duration_ms(mode);
+            for ptime_f in [1usize, 2, 4] {
+                for maxptime_f in [2usize, 4, 8] {
+                    let s = build_fmtp_with_ptime(mode, Some(ptime_f), Some(maxptime_f));
+                    assert_eq!(parse_mode_from_fmtp(&s).unwrap(), mode, "fmtp={s:?}");
+
+                    let expect_ptime =
+                        (ptime_f as u32 * frame_ms).min(maxptime_f as u32 * frame_ms);
+                    assert_eq!(parse_ptime_from_fmtp(&s), Some(expect_ptime), "fmtp={s:?}",);
+                    assert_eq!(
+                        parse_maxptime_from_fmtp(&s),
+                        Some(maxptime_f as u32 * frame_ms),
+                        "fmtp={s:?}",
+                    );
+                    // The depacketiser construction path stays happy.
+                    let dk = Depacketiser::from_sdp_fmtp(&s).unwrap();
+                    assert_eq!(dk.mode(), mode);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn build_fmtp_with_ptime_cap_derivation_matches_maxptime() {
+        // When both ptime and maxptime are emitted, the inbound cap
+        // derivation prefers maxptime — so the derived Packetiser cap
+        // equals the maxptime frame count regardless of the ptime arm.
+        for mode in [FrameMode::Ms20, FrameMode::Ms30] {
+            for maxptime_f in [2usize, 4, 8] {
+                let s = build_fmtp_with_ptime(mode, Some(1), Some(maxptime_f));
+                assert_eq!(
+                    max_frames_per_packet_from_fmtp(&s, mode),
+                    Some(maxptime_f),
+                    "fmtp={s:?}",
+                );
+            }
+        }
     }
 
     // ----- dropped-frame concealment helpers -----

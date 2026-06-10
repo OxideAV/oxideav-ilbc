@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (round 267 — RFC 4566 §6 outbound `ptime` emission in the SDP `fmtp` builder)
+
+- `src/rtp.rs`: `build_fmtp_with_ptime(mode, ptime_frames, maxptime_frames)`
+  closes the outbound mirror of the round-258 `parse_ptime_from_fmtp`.
+  The round-226 `build_fmtp` only emitted `mode` + an optional
+  `;maxptime=M`, so an outbound `fmtp` line could advertise the
+  per-packet *cap* but not the RFC 4566 §6 *typical* aggregation
+  (`ptime`). The new builder takes both aggregation values in frames
+  (the same vocabulary as `Packetiser::with_max_frames_per_packet` and
+  `max_frames_per_packet_from_fmtp`), converts to ms via
+  `frame_duration_ms`, and emits `mode=N;ptime=P;maxptime=M` in
+  canonical SDP order.
+  - `ptime` is emitted whenever `ptime_frames` is `Some(p)` with
+    `p >= 1` — a `ptime` of one whole frame is a meaningful
+    advertisement (unlike the `maxptime` cap, which a single frame
+    collapses away).
+  - When both are emitted, `ptime` is clamped to never exceed
+    `maxptime` (RFC 4566 §6: the typical aggregation cannot exceed the
+    advertised maximum), so the builder never produces a
+    self-contradictory line.
+  - The `maxptime`-only path (`ptime_frames = None`) is byte-identical
+    to `build_fmtp(mode, maxptime_frames)`.
+- 7 new unit tests in `src/rtp.rs`
+  (`build_fmtp_with_ptime_emits_bare_mode_when_no_aggregation`,
+  `build_fmtp_with_ptime_emits_ptime_in_ms`,
+  `build_fmtp_with_ptime_emits_both_in_canonical_order`,
+  `build_fmtp_with_ptime_keeps_maxptime_only_when_no_ptime`,
+  `build_fmtp_with_ptime_clamps_ptime_to_maxptime`,
+  `build_fmtp_with_ptime_round_trips_through_inbound_parsers`,
+  `build_fmtp_with_ptime_cap_derivation_matches_maxptime`). The
+  round-trip test pins outbound→inbound parity across both modes and a
+  `ptime × maxptime` frame-count ladder; the cap-derivation test
+  confirms `max_frames_per_packet_from_fmtp` still prefers `maxptime`
+  over the freshly-emitted `ptime`.
+
 ### Added (round 258 — RFC 3952 §4.2 / RFC 4566 §6 inbound `ptime` / `maxptime` parsers and `max_frames_per_packet` derivation)
 
 - `src/rtp.rs`: three new free functions close the inbound mirror of

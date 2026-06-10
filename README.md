@@ -350,6 +350,19 @@ Covered:
   `build_fmtp(mode, Some(N))` round-trips through
   `max_frames_per_packet_from_fmtp(..., mode)` back to `N` for
   any `N >= 2`.
+- **Outbound `ptime`** (round 267) — `build_fmtp_with_ptime(mode,
+  ptime_frames, maxptime_frames)` closes the outbound mirror of
+  `parse_ptime_from_fmtp`: the round-226 `build_fmtp` only emitted
+  `mode` + `maxptime`, so there was no way to advertise the RFC 4566
+  §6 *typical* per-packet aggregation. The new builder takes both
+  aggregations in frames, converts to ms via `frame_duration_ms`, and
+  emits `mode=N;ptime=P;maxptime=M` in canonical SDP order. A `ptime`
+  of one whole frame is kept (unlike the `maxptime` cap, which a
+  single frame collapses away), and when both are present `ptime` is
+  clamped to never exceed `maxptime` (RFC 4566 §6 invariant). The
+  emitted value round-trips back through `parse_ptime_from_fmtp` /
+  `parse_maxptime_from_fmtp` / `parse_mode_from_fmtp` to the same
+  `(mode, ptime, maxptime)` triple.
 
 The depacketiser → decoder handoff is exercised end-to-end by
 `tests/rtp_depacketiser_drives_decoder.rs`: encoder emits 2–5
