@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (round 274 — numeric-table provenance cross-check against `docs/audio/ilbc/tables/`)
+
+- `tests/table_provenance.rs`: new integration driver that pins every
+  normative quantiser table the crate ships against the independently
+  extracted integer (Q-domain) tables under `docs/audio/ilbc/tables/`.
+  The crate transcribes its codebooks from the RFC 3951 Appendix A
+  decimal listing; the docs tree carries the same tables as fixed-point
+  constants extracted by a pure data-only extractor. The two derivations
+  are independent, so agreement (after mapping the fixed-point integer
+  back to the rational the RFC prints, `int / 2^q`, rounded to nearest)
+  is an audit-grade cross-check that the codebooks the decoder + encoder
+  use carry exactly the normative values.
+- 6 tests, covering 1208 numeric facts end to end:
+  - `lsf_codebook_matches_docs_q13` — all 1088 split-VQ LSF codebook
+    entries (`LSF_CB_TBL_{1,2,3}` flattened, 64×3 + 128×3 + 128×4)
+    against `lsf-quantizer-codebook.csv` at Q13.
+  - `lsf_mean_matches_docs_q13` — the 10-entry `LSF_MEAN` against
+    `lsf-mean-Q13.csv` at Q13.
+  - `gain_sq{3,4,5}_matches_docs_q14` — the 8 / 16 / 32-entry gain
+    codebooks (`GAIN_SQ{3,4,5}_TBL`) against
+    `gain-codebook-{3,4,5}bit-Q14.csv` at Q14 (the docs CSVs carry a
+    trailing 32767 saturation sentinel the crate omits; the leading
+    8 / 16 / 32 entries are compared).
+  - `state_sq3_matches_docs_q13` — the 8-entry start-state scalar
+    quantiser (`STATE_SQ3_TBL`) against `state-quantizer-3bit-Q15.csv`.
+    The docs `.meta` labels the table Q15 after the WebRTC storage
+    domain, but the RFC decimal listing the crate transcribes is the
+    integer divided by 2^13 (e.g. -30473 / 8192 = -3.719849), so the
+    crate float maps back at Q13; the numeric facts are identical.
+- Where `docs/` is not checked out (a downstream rig vendoring the crate
+  without the submodule) each test logs a skip and returns, matching the
+  `read_or_skip` convention in `docs_corpus.rs` / `trace_validation.rs`.
+- This validation catches any future single-entry transcription typo on
+  the *whole* table immediately, with no dependence on which fixture's
+  CELP synthesis path a given index happens to exercise — a gap the
+  per-fixture `docs_corpus.rs` PSNR-floor gates can only cover
+  indirectly and only for the indices a fixture reaches.
+
 ### Added (round 267 — RFC 4566 §6 outbound `ptime` emission in the SDP `fmtp` builder)
 
 - `src/rtp.rs`: `build_fmtp_with_ptime(mode, ptime_frames, maxptime_frames)`

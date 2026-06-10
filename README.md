@@ -96,11 +96,19 @@ PTS at the 8 kHz time base.
 
 Flagged explicitly in each module where they apply:
 
-- Large Appendix A tables (split-VQ LSF codebooks, augmented codebook
-  gain quantisers, start-state tables) are imported as condensed
-  subsets sufficient to produce a monotone-LSF / bounded-output
-  decoder on all index values. See `lsf_tables.rs` and
-  `cb_tables.rs` module docs for the exact coverage.
+- The split-VQ LSF codebooks (`LSF_CB_TBL_{1,2,3}`, the full
+  64×3 + 128×3 + 128×4 = 1088-entry table), the LSF mean vector, the
+  three gain quantisers (`GAIN_SQ{3,4,5}_TBL`), and the start-state
+  scalar quantiser (`STATE_SQ3_TBL`) are the complete Appendix A
+  tables, transcribed verbatim from the RFC 3951 decimal listing.
+  `tests/table_provenance.rs` cross-checks all 1208 of these numeric
+  facts against the independently extracted fixed-point (Q-domain)
+  tables under `docs/audio/ilbc/tables/`: every crate `f32`, scaled
+  into the matching Q-domain and rounded to nearest, equals the docs
+  integer exactly (LSF + state at Q13, gains at Q14). Other large
+  Appendix A tables (the enhancer / PLC / windowing coefficient
+  tables) are imported as the subsets the decode + encode paths
+  exercise; see the per-module docs for the exact coverage.
 - **Wire-format bit layout matches RFC 3951 §3.8 ULP** as of round 219
   (previous rounds used a simplified flat layout — encoder and decoder
   agreed on it but it was incompatible with reference iLBC payloads).
