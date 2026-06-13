@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (round 289 — encoder codebook-search FIR hoist, bit-identical)
+
+- `cb_search::search_stage_capped` (the inner scoring loop of the
+  encoder's `search_cb_capped_with_gain_correction`) and the
+  analysis-by-synthesis ZSR precompute in `cb_search::search_cb_abs`
+  now compute the expanded-codebook FIR (`cb::filter_cb_memory`) once
+  per stage and extract every candidate through the new
+  `cb::extract_cbvec_into_filtered`, which writes into a reused scratch
+  buffer using branch- and arithmetic-identical code to
+  `extract_cbvec_veclen`. Previously each candidate re-allocated a
+  `Vec<f32>` and, for the ~128 expanded indices per stage, re-ran the
+  8-tap `cbfiltersTbl` convolution over the full 147-sample codebook
+  memory.
+- Output is **bit-identical**: same indices, same dequantised gains,
+  same emitted packet bytes. The byte-exact `tests/trace_validation.rs`
+  and `tests/docs_corpus.rs` encoder fixtures pass unchanged.
+- New guard test `cb::tests::into_filtered_bit_identical_to_veclen`
+  asserts `f32::to_bits` equality between `extract_cbvec_into_filtered`
+  and `extract_cbvec_veclen` across the entire codebook index range for
+  the 40-sample and 22/23-sample boundary-block target lengths.
+- Measured on `benches/encode.rs` (mono 8 kHz): ~49 % faster encode on
+  all three scenarios — 20 ms×1 s 7.98→4.10 ms, 30 ms×1 s 10.81→5.54 ms,
+  20 ms×3 s 23.80→12.13 ms.
+
 ### Added (round 274 — numeric-table provenance cross-check against `docs/audio/ilbc/tables/`)
 
 - `tests/table_provenance.rs`: new integration driver that pins every

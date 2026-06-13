@@ -142,7 +142,7 @@ pub(crate) fn create_augmented_vec(
 ///
 /// Returns a length-`lMem` buffer aligned to the original memory
 /// (the filter's group delay of 4 samples is compensated).
-fn filter_cb_memory(mem: &[f32]) -> Vec<f32> {
+pub(crate) fn filter_cb_memory(mem: &[f32]) -> Vec<f32> {
     let lmem = mem.len();
     let pad = CB_HALFFILTERLEN;
     let total = lmem + CB_FILTERLEN; // pad + mem + (pad+1), we only need `lmem` outputs
@@ -228,6 +228,63 @@ pub fn extract_cbvec_veclen(cb_mem: &[f32], index: u16, cbveclen: usize) -> Vec<
     }
 
     cbvec
+}
+
+/// Extract a codebook vector into `out` using a **precomputed** filtered
+/// memory buffer for the expanded regions, avoiding the per-call
+/// `filter_cb_memory` recomputation and the per-call `Vec` allocation
+/// that [`extract_cbvec_veclen`] performs.
+///
+/// `filtered` must equal `filter_cb_memory(cb_mem)`. Every branch and
+/// arithmetic operation here is identical to [`extract_cbvec_veclen`],
+/// so the written values are bit-for-bit the same; the only difference
+/// is that the filtered buffer is supplied once by the caller (the
+/// encoder's codebook search reuses it across all expanded candidates
+/// in a stage) instead of being rebuilt for every index.
+///
+/// `out.len()` must equal `cbveclen`.
+pub(crate) fn extract_cbvec_into_filtered(
+    cb_mem: &[f32],
+    filtered: &[f32],
+    index: u16,
+    cbveclen: usize,
+    out: &mut [f32],
+) {
+    debug_assert_eq!(out.len(), cbveclen);
+    let lmem = cb_mem.len();
+    let base_size_no_aug = lmem - cbveclen + 1;
+    let base_size = if cbveclen == SUBL {
+        base_size_no_aug + cbveclen / 2
+    } else {
+        base_size_no_aug
+    };
+    let total_size = 2 * base_size;
+    let index = (index as usize) % total_size;
+
+    if index < base_size_no_aug {
+        let k = index + cbveclen;
+        let start = lmem - k;
+        out[..cbveclen].copy_from_slice(&cb_mem[start..start + cbveclen]);
+    } else if index < base_size {
+        let k = 2 * (index - base_size_no_aug) + cbveclen;
+        let aug_idx = k / 2;
+        let mut out_arr = [0.0f32; SUBL];
+        create_augmented_vec(cb_mem, lmem, aug_idx, &mut out_arr);
+        out[..cbveclen].copy_from_slice(&out_arr[..cbveclen]);
+    } else {
+        let sub_idx = index - base_size;
+        if sub_idx < base_size_no_aug {
+            let k = sub_idx + cbveclen;
+            let start = lmem - k;
+            out[..cbveclen].copy_from_slice(&filtered[start..start + cbveclen]);
+        } else {
+            let k = 2 * (sub_idx - base_size_no_aug) + cbveclen;
+            let aug_idx = k / 2;
+            let mut out_arr = [0.0f32; SUBL];
+            create_augmented_vec(filtered, lmem, aug_idx, &mut out_arr);
+            out[..cbveclen].copy_from_slice(&out_arr[..cbveclen]);
+        }
+    }
 }
 
 /// Extract a 40-sample codebook vector from the 147-sample adaptive
@@ -443,6 +500,38 @@ mod tests {
         let e = construct_excitation(&mem, &[5, 10, 20], &[16, 8, 4]);
         for v in e.iter() {
             assert!(v.is_finite());
+        }
+    }
+
+    #[test]
+    fn into_filtered_bit_identical_to_veclen() {
+        // The encoder's codebook search now extracts candidates via
+        // `extract_cbvec_into_filtered` with a once-computed filtered
+        // buffer. Every produced value must be bit-for-bit identical to
+        // the per-call `extract_cbvec_veclen` it replaces — across the
+        // entire index range and both target lengths the search uses.
+        for &(mem_len, cbveclen) in &[(CB_LMEM, SUBL), (85usize, 22usize), (85, 23)] {
+            let mem: Vec<f32> = (0..mem_len)
+                .map(|i| (i as f32 * 0.137).sin() * 73.0)
+                .collect();
+            let filtered = filter_cb_memory(&mem);
+            let total = 2 * if cbveclen == SUBL {
+                (mem_len - cbveclen + 1) + cbveclen / 2
+            } else {
+                mem_len - cbveclen + 1
+            };
+            let mut scratch = vec![0.0f32; cbveclen];
+            for idx in 0..total {
+                let want = extract_cbvec_veclen(&mem, idx as u16, cbveclen);
+                extract_cbvec_into_filtered(&mem, &filtered, idx as u16, cbveclen, &mut scratch);
+                for n in 0..cbveclen {
+                    assert_eq!(
+                        want[n].to_bits(),
+                        scratch[n].to_bits(),
+                        "mem_len={mem_len} cbveclen={cbveclen} idx={idx} n={n}"
+                    );
+                }
+            }
         }
     }
 }

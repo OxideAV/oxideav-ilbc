@@ -30,7 +30,10 @@
 //! For the 22/23-sample boundary block:
 //!   - total = 128, stages 0/1/2 all 7 bits.
 
-use crate::cb::{extract_cbvec_veclen, update_cb_memory, GAIN_SQ3_TBL, GAIN_SQ4_TBL, GAIN_SQ5_TBL};
+use crate::cb::{
+    extract_cbvec_into_filtered, extract_cbvec_veclen, filter_cb_memory, update_cb_memory,
+    GAIN_SQ3_TBL, GAIN_SQ4_TBL, GAIN_SQ5_TBL,
+};
 use crate::{CB_LMEM, LPC_ORDER, SUBL};
 
 /// Maximum absolute gain (RFC 3951 §3.6.4.1).
@@ -375,13 +378,22 @@ fn search_stage_capped(
     let mut best_gain = 0.0f32;
     let mut best_vec = vec![0.0f32; cbveclen];
 
+    // The expanded half of the codebook is drawn from a single
+    // FIR-filtered copy of the memory; `extract_cbvec_veclen` rebuilds
+    // that copy on every expanded index. Filter once here and feed the
+    // result into `extract_cbvec_into_filtered`, which produces
+    // bit-identical vectors (same branches, same arithmetic) without the
+    // per-candidate FIR recomputation or `Vec` allocation.
+    let filtered = filter_cb_memory(cb_mem);
+    let mut scratch = vec![0.0f32; cbveclen];
+
     for i in 0..total {
-        let v = extract_cbvec_veclen(cb_mem, i as u16, cbveclen);
+        extract_cbvec_into_filtered(cb_mem, &filtered, i as u16, cbveclen, &mut scratch);
         let mut dot = 0.0f32;
         let mut nrm = 0.0f32;
         for n in 0..cbveclen {
-            dot += target[n] * v[n];
-            nrm += v[n] * v[n];
+            dot += target[n] * scratch[n];
+            nrm += scratch[n] * scratch[n];
         }
         if nrm < 1e-12 {
             continue;
@@ -398,7 +410,7 @@ fn search_stage_capped(
             best_measure = measure;
             best_idx = i as u16;
             best_gain = gain;
-            best_vec = v;
+            best_vec.copy_from_slice(&scratch);
         }
     }
     if best_measure.is_infinite() {
@@ -443,11 +455,11 @@ pub fn search_cb_abs(
     // Pre-compute ZSR for all 256 codebook vectors (worst case).
     // total_cb_size for 40-sample target with 147-sample memory = 256.
     let total = total_cb_size(CB_LMEM, SUBL);
+    let filtered = filter_cb_memory(cb_mem);
     let mut zsrs: Vec<[f32; SUBL]> = Vec::with_capacity(total);
+    let mut arr = [0.0f32; SUBL];
     for i in 0..total {
-        let cbv = extract_cbvec_veclen(cb_mem, i as u16, SUBL);
-        let mut arr = [0.0f32; SUBL];
-        arr.copy_from_slice(&cbv);
+        extract_cbvec_into_filtered(cb_mem, &filtered, i as u16, SUBL, &mut arr);
         let zsr = zero_state_response(&arr, a);
         zsrs.push(zsr);
     }

@@ -227,6 +227,38 @@ owned-vs-borrowed depacketise pair already pins the per-frame
 `Vec<u8>` clone cost relative to the zero-copy slice walk
 (measured ~11× gap on the 8-frame 20 ms input).
 
+### Encoder codebook-search optimisation (round 289)
+
+The encoder's multistage codebook search (`cb_search::search_stage_capped`,
+the inner loop of `search_cb_capped_with_gain_correction`) is the
+dominant encode cost: each of the three stages scores up to 256
+candidate vectors per sub-block. Each candidate was extracted with
+`cb::extract_cbvec_veclen`, which (a) allocated a fresh `Vec<f32>`
+per call and (b) for every index in the *expanded* half of the
+codebook re-ran the 8-tap `cbfiltersTbl` FIR over the whole
+147-sample memory — recomputing the **same** filtered buffer ~128
+times per stage.
+
+Round 289 hoists that FIR: the search now calls `filter_cb_memory`
+once per stage and extracts every candidate through the new
+`cb::extract_cbvec_into_filtered`, which writes into a reused scratch
+buffer using branch- and arithmetic-identical code to
+`extract_cbvec_veclen`. The same hoist is applied to the
+analysis-by-synthesis ZSR precompute in `search_cb_abs`. The change
+is **bit-identical** — `cb::tests::into_filtered_bit_identical_to_veclen`
+asserts `f32::to_bits` equality across the full index range for the
+40-sample and 22/23-sample boundary targets, and the byte-exact
+`tests/trace_validation.rs` encoder fixtures are unchanged.
+
+Measured on the `encode` criterion harness (mono 8 kHz), the encode
+path is **~49 % faster** across all three scenarios:
+
+| scenario       | before    | after     |
+| -------------- | --------- | --------- |
+| 20 ms × 1 s    | 7.98 ms   | 4.10 ms   |
+| 30 ms × 1 s    | 10.81 ms  | 5.54 ms   |
+| 20 ms × 3 s    | 23.80 ms  | 12.13 ms  |
+
 ## Fuzzing
 
 A `cargo-fuzz` harness in `fuzz/` exercises every attacker-facing
