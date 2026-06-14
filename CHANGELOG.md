@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (round 303 — bitstream-unpack cross-check against the fixture `trace.txt` ULP oracle)
+
+- `tests/bitstream_trace.rs`: a new integration driver that validates the
+  RFC 3951 §3.8 unequal-level-protection (ULP) inverse-unpack
+  (`bitreader::parse_frame` → `ulp::unpack_logical`) against the
+  decoder-implementation-independent static `trace.txt` files shipped with
+  every `docs/audio/ilbc/fixtures/` fixture. The trace records the integer
+  parameters the reference encoder packed (LSF split-VQ indices,
+  `start_subframe` / `state_first` / `scale_factor_idx_ifm`, the boundary
+  22/23-sample block, every adaptive-codebook sub-block's three-stage
+  `cb_idx` / `gain_idx`, the first-16 start-state-sample MSB fingerprint,
+  and the empty-frame trailing bit) — all pure bit-extraction, no numeric
+  dequantisation. One test per fixture (12 total) cross-checks every field
+  of every frame: **470 frames** across both modes
+  (5×50 + 4×33 + 25 + 40 = the 20 ms / 30 ms / containerless / mid-stream
+  fixtures) come back bit-exact. This pins the §3.8 unpack as a true
+  correctness gate the `docs_corpus.rs` PSNR floors cannot provide: the
+  trace compares the recovered indices straight off the wire, immune to the
+  LSF→LPC / §4.2 phase-compensator / §4.6 enhancer / §4.8 post-filter float
+  drift that the synthesised-PCM PSNR absorbs. A negative-control sweep
+  (perturbing one ULP class-split row) confirmed the driver red-lights — 8
+  of 12 fixtures fail under a single-bit class reallocation.
+
 ### Added (round 297 — extend numeric-table provenance to the HP / CB / enhancer-polyphaser coefficient tables)
 
 - `tests/table_provenance.rs`: four new cross-checks pin the remaining

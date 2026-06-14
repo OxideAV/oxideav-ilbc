@@ -123,7 +123,19 @@ Flagged explicitly in each module where they apply:
   Per-parameter class-1 / class-2 / class-3 widths come from RFC
   Appendix A.41 `ULP_20msTbl` / `ULP_30msTbl`; the three-pass
   pack/unpack mirrors Appendix A.42 `unpack` / `packsplit` /
-  `packcombine`. See `src/ulp.rs`.
+  `packcombine`. See `src/ulp.rs`. As of round 303
+  `tests/bitstream_trace.rs` pins this inverse-ULP unpack as a true
+  correctness gate: it cross-checks `bitreader::parse_frame` against the
+  decoder-implementation-independent static `trace.txt` files shipped with
+  each `docs/audio/ilbc/fixtures/` fixture. The trace records only the
+  integer indices the reference encoder packed (LSF split-VQ,
+  `start_subframe` / `state_first` / `scale_factor_idx_ifm`, the boundary
+  block and every adaptive-codebook sub-block's three-stage `cb_idx` /
+  `gain_idx`, the first-16 start-state-sample MSB fingerprint, and the
+  empty-frame trailing bit) — pure bit-extraction, no numeric dequant. All
+  **470 frames** across the 12 fixtures (both modes + containerless +
+  mid-stream) come back bit-exact, immune to the CELP float drift that the
+  `docs_corpus.rs` PSNR floors must absorb.
 - The §3.5.3 DPCM noise-shaping start-state quantiser (Appendix A.46
   `AbsQuantW`, perceptual weighting via `Ak(z/0.4222)`) is implemented
   but **off by default** (`state_dpcm=on` to enable). Like the §3.6.2
