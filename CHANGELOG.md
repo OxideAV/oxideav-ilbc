@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (round 297 — extend numeric-table provenance to the HP / CB / enhancer-polyphaser coefficient tables)
+
+- `tests/table_provenance.rs`: four new cross-checks pin the remaining
+  normative coefficient tables the crate transcribes from RFC 3951
+  Appendix A against the independently extracted fixed-point tables
+  under `docs/audio/ilbc/tables/`. Each maps a crate `f32` constant into
+  the docs Q-domain, rounds to nearest, and asserts exact equality.
+  - `hp_input_coefs_match_docs_q14` / `hp_output_coefs_match_docs_q14` —
+    the §3.1 input and §4.8 output high-pass biquads
+    (`HP{I,O}_{ZERO,POLE}_COEFS`) against
+    `input-highpass-coefficients-Q14.csv` /
+    `output-highpass-coefficients-Q14.csv`. The crate stores each filter
+    in the normalised float form the RFC prints (`b = [b0,b1,b2]`,
+    `a = [1.0,a1,a2]`); the docs 5-tuple `[b0,b1,b2,a1,a2]` is the same
+    biquad in the fixed-point reference's storage convention — every
+    coefficient scaled by `1/4` (Direct-Form-I int32 headroom) and the
+    denominator `a1`/`a2` sign-flipped (the reference's IIR pass adds the
+    feedback terms). A new `assert_hp_match` helper applies the documented
+    `/4` scale + denominator negation before comparing at Q14.
+  - `cb_filter_matches_docs_q12` — the 8-tap §3.6.3.2 codebook expansion
+    filter (`CB_FILTERS_TBL`) against `codebook-filter-reverse-Q12.csv` at
+    Q12. The crate stores the taps forward and consumes them tail-first in
+    `getCBvec`; the docs table is the same taps under the reference's
+    already-reversed storage name, so the crate's forward order maps
+    element-for-element onto the docs vector.
+  - `enhancer_polyphaser_matches_docs_q12` — the 4-phase × 7-tap = 28-entry
+    §4.6.2 enhancer polyphase interpolation filter (`POLYPHASER_TBL`)
+    against `enhancement-polyphaser.csv` at Q12.
+- 46 further numeric facts validated (10 HP taps + 8 CB taps + 28
+  polyphaser taps), all currently green. A transcription typo in any of
+  these coefficients would previously only have been caught indirectly by
+  the `docs_corpus.rs` PSNR-floor gates (and only when `hp_filter=on` for
+  the HP taps, or for the codebook indices a given fixture reaches); the
+  provenance driver now red-lights such a typo immediately on the whole
+  table with no dependence on the CELP synthesis path.
+- Where `docs/` is not checked out each test logs a skip and returns,
+  matching the existing `read_or_skip` convention.
+
 ### Changed (round 289 — encoder codebook-search FIR hoist, bit-identical)
 
 - `cb_search::search_stage_capped` (the inner scoring loop of the

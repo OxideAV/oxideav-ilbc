@@ -28,7 +28,9 @@
 use std::fs;
 use std::path::PathBuf;
 
-use oxideav_ilbc::cb::{GAIN_SQ3_TBL, GAIN_SQ4_TBL, GAIN_SQ5_TBL};
+use oxideav_ilbc::cb::{CB_FILTERS_TBL, GAIN_SQ3_TBL, GAIN_SQ4_TBL, GAIN_SQ5_TBL};
+use oxideav_ilbc::enhancer::POLYPHASER_TBL;
+use oxideav_ilbc::hp_filter::{HPI_POLE_COEFS, HPI_ZERO_COEFS, HPO_POLE_COEFS, HPO_ZERO_COEFS};
 use oxideav_ilbc::lsf_tables::{LSF_CB_TBL_1, LSF_CB_TBL_2, LSF_CB_TBL_3, LSF_MEAN};
 use oxideav_ilbc::state::STATE_SQ3_TBL;
 
@@ -163,4 +165,96 @@ fn state_sq3_matches_docs_q13() {
     // facts are identical; only the documented Q-domain label differs.
     assert_eq!(STATE_SQ3_TBL.len(), 8, "crate state SQ3 length");
     assert_q_match("state-quantizer-3bit", &STATE_SQ3_TBL, &docs, 13);
+}
+
+/// Cross-check one of the two §3.1 / §4.8 high-pass biquads against its
+/// docs Q14 integer table.
+///
+/// The crate stores each filter in the normalised floating form the
+/// RFC 3951 Appendix A listing prints: `b = [b0, b1, b2]` and
+/// `a = [1.0, a1, a2]`. The docs fixed-point table is the same biquad in
+/// the reference's storage convention, a 5-tuple `[b0, b1, b2, a1, a2]`
+/// in Q14 with two transforms applied:
+///
+/// - **Gain shift of 1/4.** The fixed-point reference scales every
+///   coefficient by `1/4` so the Direct-Form-I accumulator stays inside
+///   the int32 headroom; `docs = round(coef / 4 * 2^14)`.
+/// - **Negated denominator.** The reference stores `a1` / `a2`
+///   sign-flipped so its IIR pass adds the feedback terms instead of
+///   subtracting them; `docs[3] = round(-a1 / 4 * 2^14)`,
+///   `docs[4] = round(-a2 / 4 * 2^14)`. The leading normalised `a0 = 1.0`
+///   is not stored.
+///
+/// Both derivations are independent (RFC decimal listing vs. fixed-point
+/// constant table); agreement after the documented transform is an
+/// audit-grade check that the crate transcribed the normative biquad
+/// coefficients exactly.
+fn assert_hp_match(label: &str, b: &[f32; 3], a: &[f32; 3], docs: &[i64]) {
+    assert_eq!(docs.len(), 5, "{label}: docs HP table length (expected 5)");
+    assert!(
+        (a[0] - 1.0).abs() < f32::EPSILON,
+        "{label}: crate a0 must be the normalised 1.0, got {}",
+        a[0]
+    );
+    // b0, b1, b2 — direct /4 scale.
+    let b_q14: [i64; 3] = [
+        to_q(b[0] / 4.0, 14),
+        to_q(b[1] / 4.0, 14),
+        to_q(b[2] / 4.0, 14),
+    ];
+    // a1, a2 — /4 scale AND sign-flip (reference stores the negated
+    // denominator).
+    let a_q14: [i64; 2] = [to_q(-a[1] / 4.0, 14), to_q(-a[2] / 4.0, 14)];
+    let got = [b_q14[0], b_q14[1], b_q14[2], a_q14[0], a_q14[1]];
+    for (i, (&g, &d)) in got.iter().zip(docs.iter()).enumerate() {
+        let field = ["b0", "b1", "b2", "a1", "a2"][i];
+        assert_eq!(
+            g, d,
+            "{label}: {field} mismatch — crate → Q14 {g}, docs {d}"
+        );
+    }
+}
+
+#[test]
+fn hp_input_coefs_match_docs_q14() {
+    let Some(docs) = read_int_csv("input-highpass-coefficients-Q14.csv") else {
+        return;
+    };
+    assert_hp_match("input-highpass", &HPI_ZERO_COEFS, &HPI_POLE_COEFS, &docs);
+}
+
+#[test]
+fn hp_output_coefs_match_docs_q14() {
+    let Some(docs) = read_int_csv("output-highpass-coefficients-Q14.csv") else {
+        return;
+    };
+    assert_hp_match("output-highpass", &HPO_ZERO_COEFS, &HPO_POLE_COEFS, &docs);
+}
+
+#[test]
+fn cb_filter_matches_docs_q12() {
+    let Some(docs) = read_int_csv("codebook-filter-reverse-Q12.csv") else {
+        return;
+    };
+    // The crate stores the 8-tap `cbfiltersTbl` (RFC §3.6.3.2) forward and
+    // consumes it tail-first in `getCBvec`; the docs table carries the same
+    // taps under the reference's already-reversed storage name
+    // (`*Rev`, consumed tail-first too), so the crate's forward order maps
+    // element-for-element onto the docs vector at Q12.
+    assert_eq!(CB_FILTERS_TBL.len(), 8, "crate cbfilters length");
+    assert_eq!(docs.len(), 8, "docs cb-filter length");
+    assert_q_match("codebook-filter", &CB_FILTERS_TBL, &docs, 12);
+}
+
+#[test]
+fn enhancer_polyphaser_matches_docs_q12() {
+    let Some(docs) = read_int_csv("enhancement-polyphaser.csv") else {
+        return;
+    };
+    // 4-phase × 7-tap = 28-entry polyphase interpolation filter
+    // (RFC §4.6.2). The docs CSV is the same table flattened in the same
+    // phase-major order the crate stores it, at Q12.
+    assert_eq!(POLYPHASER_TBL.len(), 28, "crate polyphaser length");
+    assert_eq!(docs.len(), 28, "docs polyphaser length");
+    assert_q_match("enhancement-polyphaser", &POLYPHASER_TBL, &docs, 12);
 }

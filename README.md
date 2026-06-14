@@ -105,7 +105,15 @@ Flagged explicitly in each module where they apply:
   facts against the independently extracted fixed-point (Q-domain)
   tables under `docs/audio/ilbc/tables/`: every crate `f32`, scaled
   into the matching Q-domain and rounded to nearest, equals the docs
-  integer exactly (LSF + state at Q13, gains at Q14). Other large
+  integer exactly (LSF + state at Q13, gains at Q14). As of round 297
+  the same driver also pins the §3.1 / §4.8 input + output high-pass
+  biquad coefficients (`HP{I,O}_{ZERO,POLE}_COEFS`, docs Q14 — the
+  reference stores them scaled by 1/4 with the denominator
+  sign-flipped), the §3.6.3.2 codebook expansion filter
+  (`CB_FILTERS_TBL`, docs Q12) and the §4.6.2 enhancer polyphase
+  interpolation filter (`POLYPHASER_TBL`, 4-phase × 7-tap, docs Q12) —
+  46 further numeric facts (10 HP taps + 8 CB taps + 28 polyphaser
+  taps). Other large
   Appendix A tables (the enhancer / PLC / windowing coefficient
   tables) are imported as the subsets the decode + encode paths
   exercise; see the per-module docs for the exact coverage.
