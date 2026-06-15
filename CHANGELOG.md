@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/OxideAV/oxideav-ilbc/compare/v0.0.6...v0.0.7) - 2026-06-15
+
+### Other
+
+- ilbc r312: pin §4.2.1 LPC analysis windows in table-provenance audit
+- bitstream-unpack cross-check against fixture trace.txt ULP oracle
+- ilbc r297: extend numeric-table provenance to HP / CB / enhancer-polyphaser coefficients
+- hoist expanded-codebook FIR out of encoder CB-search inner loop (~49% faster encode, bit-identical)
+- cross-check normative quantiser tables against docs Q-domain CSVs
+- outbound ptime emission in SDP fmtp builder (RFC 4566 §6)
+- RFC 3952 §4.2 / RFC 4566 §6 inbound ptime / maxptime parsers + cap derivation
+- drop release-plz.toml — use release-plz defaults across the workspace
+- focused libFuzzer target for RFC 3952 RTP gap-fill / PLC surface
+- focused libFuzzer target for RFC 3952 §4.2 SDP fmtp parser
+- RFC 3952 dropped-frame concealment helpers on Depacketiser
+- depth-mode Criterion bench for RFC 3952 RTP pack / depack
+- RFC 3952 §4.2 outbound SDP fmtp builders
+- RFC 3951 §3.8 ULP bit layout (drop flat-layout deviation)
+- RFC 3951 §4.8 output HP post-filter
+- scrub enumerated denial + path-naming references
+- cargo-fuzz harness with RFC 3952 RTP depacketiser target
+- RFC 3952 payload depacketiser + packetiser
+
 ### Added (round 312 — LPC analysis-window provenance cross-check)
 
 - `tests/table_provenance.rs`: two new audit-grade cross-checks pin the
