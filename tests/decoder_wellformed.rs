@@ -4,8 +4,8 @@
 //! ## Why this test exists
 //!
 //! The companion `docs_corpus.rs` driver scores our decoder against each
-//! fixture's `expected.wav` (FFmpeg's native iLBC decode of a
-//! libilbc-encoded bitstream). For the **tonal** fixtures (sine / noise
+//! fixture's `expected.wav` (an external black-box reference decode of
+//! the corpus bitstream). For the **tonal** fixtures (sine / noise
 //! / voice-like / DTMF) the reference WAV is anomalous: 0.45–1.7 % of
 //! its samples slam to the int16 rails (±32767/-32768) and every one of
 //! them peaks at full scale, i.e. the reference pipeline produces a
