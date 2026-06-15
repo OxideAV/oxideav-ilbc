@@ -126,12 +126,17 @@ fn rail_fraction(pcm: &[i16]) -> f64 {
     railed as f64 / pcm.len() as f64
 }
 
-fn load(name: &str) -> (Vec<Vec<u8>>, Vec<i16>) {
+/// Load a fixture's `(frames, reference_pcm)`. Returns `None` when the
+/// fixture files are absent — the `docs/audio/ilbc/fixtures/` corpus
+/// lives in a private submodule that the public CI checkout does not
+/// fetch, so these tests run for real locally and skip in CI (matching
+/// `docs_corpus.rs`'s skip-on-missing behaviour).
+fn load(name: &str) -> Option<(Vec<Vec<u8>>, Vec<i16>)> {
     let dir = fixture_dir(name);
-    let input = fs::read(dir.join("input.lbc")).expect("read input.lbc");
-    let wav = fs::read(dir.join("expected.wav")).expect("read expected.wav");
+    let input = fs::read(dir.join("input.lbc")).ok()?;
+    let wav = fs::read(dir.join("expected.wav")).ok()?;
     let (_mode, frames) = split_storage_frames(&input);
-    (frames, parse_wav_pcm(&wav))
+    Some((frames, parse_wav_pcm(&wav)))
 }
 
 /// The tonal fixtures whose `expected.wav` reference exhibits the
@@ -152,7 +157,10 @@ const TONAL_FIXTURES: &[&str] = &[
 #[test]
 fn tonal_decode_is_well_formed() {
     for &name in TONAL_FIXTURES {
-        let (frames, _reference) = load(name);
+        let Some((frames, _reference)) = load(name) else {
+            eprintln!("skip {name}: fixture corpus not present (CI without docs submodule)");
+            continue;
+        };
         let ours = decode_pcm(&frames);
         assert!(!ours.is_empty(), "{name}: empty decode");
 
@@ -195,7 +203,10 @@ fn tonal_decode_is_well_formed() {
 #[test]
 fn reference_tonal_wavs_exhibit_clipping_anomaly() {
     // Silence reference is clean: zero samples on the rails.
-    let (_frames, silence_ref) = load("mode-20ms-silence");
+    let Some((_frames, silence_ref)) = load("mode-20ms-silence") else {
+        eprintln!("skip: fixture corpus not present (CI without docs submodule)");
+        return;
+    };
     assert_eq!(
         rail_fraction(&silence_ref),
         0.0,
@@ -208,7 +219,10 @@ fn reference_tonal_wavs_exhibit_clipping_anomaly() {
     // reference is the lone clean case (0, peak 0). A 0.003 threshold
     // sits below the lowest tonal observation and above silence.
     for &name in TONAL_FIXTURES {
-        let (_frames, reference) = load(name);
+        let Some((_frames, reference)) = load(name) else {
+            eprintln!("skip {name}: fixture corpus not present (CI without docs submodule)");
+            continue;
+        };
         let railed = rail_fraction(&reference);
         let peak = reference
             .iter()
