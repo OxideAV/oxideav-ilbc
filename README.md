@@ -116,6 +116,21 @@ CI; the decode path is validated against statically captured bitstream
 trace files and against the integer index trace shipped with each
 fixture (`tests/bitstream_trace.rs`).
 
+The low (13-17 dB) PSNR on the **tonal** fixtures (sine / noise /
+voice-like / DTMF) is dominated by an anomaly in the *reference* WAVs,
+not by our reconstruction: the captured `expected.wav` for each tonal
+case slams 0.45-1.7 % of its samples to the int16 rails (a high-energy
+clipping waveform out of a clean 440 Hz sine), whereas our spec-correct
+decode of the same bitstream stays bounded (tone / voice / DTMF peaks
+≈ 3k-5k, white noise ≈ 26k) and never clips. The silence reference is
+the lone clean case (0 % clipped), which is why it scores ~95 dB.
+`tests/decoder_wellformed.rs` pins both halves of this: our decode is
+well-formed (no rail-pinning, peak < 30000) on every tonal fixture, and
+the reference WAVs do exhibit the clipping anomaly — so a future change
+can't silently "improve" the corpus PSNR by chasing the broken
+reference into an unstable, clipping decode, and a re-captured corpus
+flags the floors for re-anchoring.
+
 ## RTP payload format (RFC 3952)
 
 The `rtp` module is a pure depacketiser / packetiser — the 12-byte

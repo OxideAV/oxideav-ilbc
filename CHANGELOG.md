@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `tests/decoder_wellformed.rs`: decoder well-formedness invariants on
+  the tonal fixture corpus. Localised the source of the low (13-17 dB)
+  `docs_corpus.rs` PSNR on sine / noise / voice-like / DTMF to an
+  anomaly in the *reference* `expected.wav` files (0.45-1.7 % of samples
+  pinned to the int16 rails), not our reconstruction — our spec-correct
+  decode of the same bitstream stays bounded (peak < 30000) and never
+  clips. The new test pins both halves so a future change can't "fix"
+  the corpus PSNR by chasing the broken reference into an unstable,
+  clipping decode, and a re-captured corpus flags the floors for
+  re-anchoring. Verified the §4.4.1 `iCBConstruct` gain dequant, §4.1
+  LSF→LPC conversion, and §4.7 `syntFilter` recursion all match the
+  RFC 3951 embedded reference C.
+
 ## [0.0.7](https://github.com/OxideAV/oxideav-ilbc/compare/v0.0.6...v0.0.7) - 2026-06-15
 
 ### Other
