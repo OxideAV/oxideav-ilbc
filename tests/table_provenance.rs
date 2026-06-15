@@ -31,6 +31,7 @@ use std::path::PathBuf;
 use oxideav_ilbc::cb::{CB_FILTERS_TBL, GAIN_SQ3_TBL, GAIN_SQ4_TBL, GAIN_SQ5_TBL};
 use oxideav_ilbc::enhancer::POLYPHASER_TBL;
 use oxideav_ilbc::hp_filter::{HPI_POLE_COEFS, HPI_ZERO_COEFS, HPO_POLE_COEFS, HPO_ZERO_COEFS};
+use oxideav_ilbc::lpc_analysis::{asymmetric_window, hanning_window};
 use oxideav_ilbc::lsf_tables::{LSF_CB_TBL_1, LSF_CB_TBL_2, LSF_CB_TBL_3, LSF_MEAN};
 use oxideav_ilbc::state::STATE_SQ3_TBL;
 
@@ -257,4 +258,65 @@ fn enhancer_polyphaser_matches_docs_q12() {
     assert_eq!(POLYPHASER_TBL.len(), 28, "crate polyphaser length");
     assert_eq!(docs.len(), 28, "docs polyphaser length");
     assert_q_match("enhancement-polyphaser", &POLYPHASER_TBL, &docs, 12);
+}
+
+/// Assert every crate `f32` window sample, scaled into Q15 and rounded to
+/// nearest, equals the docs integer — saturating to the `int16_t` range
+/// the reference stores the table in.
+///
+/// The LPC analysis windows (RFC 3951 §4.2.1 `lpc_winTbl` / `lpc_asymwinTbl`)
+/// are unit-amplitude windows: at the peak a crate sample is exactly `1.0`,
+/// so `round(1.0 * 2^15) = 32768`, which overflows the signed-16-bit storage
+/// the reference fixed-point table uses and is stored as the saturated
+/// `i16::MAX` (32767). Clamping the scaled crate value into `i16` reproduces
+/// that storage step and lets the two derivations — the crate's closed-form
+/// generator and the docs fixed-point listing — be compared for exact
+/// equality everywhere else.
+fn assert_window_q15_match(label: &str, crate_vals: &[f32], docs: &[i64]) {
+    assert_eq!(
+        crate_vals.len(),
+        docs.len(),
+        "{label}: length mismatch — crate {}, docs {}",
+        crate_vals.len(),
+        docs.len()
+    );
+    for (i, (&c, &d)) in crate_vals.iter().zip(docs.iter()).enumerate() {
+        let got = to_q(c, 15).clamp(i64::from(i16::MIN), i64::from(i16::MAX));
+        assert_eq!(
+            got, d,
+            "{label}: entry #{i} mismatch — crate {c} → saturated-Q15 {got}, docs {d}"
+        );
+    }
+}
+
+#[test]
+fn lpc_hanning_window_matches_docs_q15() {
+    let Some(docs) = read_int_csv("lpc-window-Q15.csv") else {
+        return;
+    };
+    // RFC 3951 §4.2.1 symmetric analysis window (`lpc_winTbl`, 240 samples).
+    // The crate generates it from the closed form
+    // `0.5*(1 - cos(2π(i+1)/241))` mirrored about the midpoint; the docs
+    // table is the same window in Q15. Bit-exact across all 240 taps.
+    let win = hanning_window();
+    assert_eq!(win.len(), 240, "crate Hanning window length");
+    assert_eq!(docs.len(), 240, "docs LPC window length");
+    assert_window_q15_match("lpc-window", &win, &docs);
+}
+
+#[test]
+fn lpc_asymmetric_window_matches_docs_q15() {
+    let Some(docs) = read_int_csv("lpc-asymmetric-window-Q15.csv") else {
+        return;
+    };
+    // RFC 3951 §4.2.1 asymmetric analysis window (`lpc_asymwinTbl`, 240
+    // samples), used for the second 30 ms-mode LPC analysis. The crate
+    // generates it from `sin²(π(i+1)/441)` over `0..220` and
+    // `cos((i-220)π/40)` over `220..240`; the docs table is the same window
+    // in Q15. The two peak taps reach unit amplitude and saturate into the
+    // reference's `int16` storage (handled by `assert_window_q15_match`).
+    let win = asymmetric_window();
+    assert_eq!(win.len(), 240, "crate asymmetric window length");
+    assert_eq!(docs.len(), 240, "docs LPC asymmetric window length");
+    assert_window_q15_match("lpc-asymmetric-window", &win, &docs);
 }

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (round 312 — LPC analysis-window provenance cross-check)
+
+- `tests/table_provenance.rs`: two new audit-grade cross-checks pin the
+  RFC 3951 §4.2.1 LPC analysis windows against their independently
+  extracted docs fixed-point tables (`lpc-window-Q15.csv`,
+  `lpc-asymmetric-window-Q15.csv`, 240 taps each). The crate generates
+  both windows from their RFC closed forms
+  (`hanning_window` = `0.5*(1 - cos(2π(i+1)/241))` mirrored;
+  `asymmetric_window` = `sin²(π(i+1)/441)` then `cos((i-220)π/40)`)
+  rather than storing the tables, so the new `assert_window_q15_match`
+  helper scales each computed `f32` into Q15 and saturates into the
+  reference's `int16` storage (the two unit-amplitude peak taps round to
+  32768 and clamp to `i16::MAX` = 32767). Under that storage rule all
+  480 taps match the docs listing exactly — proving the closed-form
+  generators reproduce the normative analysis windows that gate the
+  entire encoder LPC-analysis path. The §4.2.1 lag window is left to the
+  corpus PSNR floors: its reference bandwidth constant differs from the
+  crate's by ~1e-4 relative, so it is not a clean fixed-point match.
+
 ### Added (round 303 — bitstream-unpack cross-check against the fixture `trace.txt` ULP oracle)
 
 - `tests/bitstream_trace.rs`: a new integration driver that validates the

@@ -113,10 +113,21 @@ Flagged explicitly in each module where they apply:
   (`CB_FILTERS_TBL`, docs Q12) and the §4.6.2 enhancer polyphase
   interpolation filter (`POLYPHASER_TBL`, 4-phase × 7-tap, docs Q12) —
   46 further numeric facts (10 HP taps + 8 CB taps + 28 polyphaser
-  taps). Other large
-  Appendix A tables (the enhancer / PLC / windowing coefficient
-  tables) are imported as the subsets the decode + encode paths
-  exercise; see the per-module docs for the exact coverage.
+  taps). As of round 312 the driver also pins the two §4.2.1 LPC
+  analysis windows — the symmetric `lpc_winTbl` and the 30 ms-mode
+  asymmetric `lpc_asymwinTbl` (240 taps each, docs Q15). The crate
+  generates these from their RFC closed forms rather than storing a
+  table, so the cross-check scales each computed `f32` into Q15 and
+  saturates into the reference's `int16` storage (the two unit-amplitude
+  peak taps round to 32768 → clamp to 32767); every one of the 480 taps
+  then matches the docs fixed-point listing exactly — an audit-grade
+  proof the closed-form window generators reproduce the normative
+  tables. Other large
+  Appendix A tables (the enhancer / PLC coefficient
+  tables, plus the lag window whose reference bandwidth constant differs
+  from the crate's by ~1e-4 relative and is gated indirectly through the
+  corpus PSNR floors) are imported as the subsets the decode + encode
+  paths exercise; see the per-module docs for the exact coverage.
 - **Wire-format bit layout matches RFC 3951 §3.8 ULP** as of round 219
   (previous rounds used a simplified flat layout — encoder and decoder
   agreed on it but it was incompatible with reference iLBC payloads).
