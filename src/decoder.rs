@@ -505,6 +505,62 @@ mod tests {
         assert_eq!(a.samples, 160);
     }
 
+    /// §4.5.2: after a run of good voiced blocks, a concealed block must
+    /// continue the previous excitation pitch-synchronously rather than
+    /// emit silence — so the concealed block carries real energy that
+    /// tracks the preceding frames (not a zero/near-zero block).
+    fn frame_energy(a: &AudioFrame) -> f64 {
+        a.data[0]
+            .chunks_exact(2)
+            .map(|c| {
+                let s = i16::from_le_bytes([c[0], c[1]]) as f64;
+                s * s
+            })
+            .sum()
+    }
+
+    #[test]
+    fn plc_continues_energy_after_good_voiced_frames() {
+        let mut dec = make_dec();
+        // Drive a string of identical non-trivial packets to build up a
+        // periodic excitation history in the synthesis state.
+        let pkt_bytes = vec![0x6Cu8; FRAME_BYTES_20MS];
+        let mut last_good_energy = 0.0;
+        for pts in 0..6 {
+            let pkt = Packet::new(0, TimeBase::new(1, SAMPLE_RATE as i64), pkt_bytes.clone())
+                .with_pts(pts * 160);
+            dec.send_packet(&pkt).unwrap();
+            let Frame::Audio(a) = dec.receive_frame().unwrap() else {
+                panic!("audio frame expected");
+            };
+            last_good_energy = frame_energy(&a);
+        }
+        assert!(last_good_energy > 0.0, "primer frames produced silence");
+
+        // Now lose a frame (empty-frame indicator). The PLC must emit a
+        // non-silent block whose energy is on the order of the last good
+        // block (it is dampened by ~0.85 but must not collapse to zero).
+        let mut bad = vec![0u8; FRAME_BYTES_20MS];
+        bad[FRAME_BYTES_20MS - 1] = 1;
+        let pkt = Packet::new(0, TimeBase::new(1, SAMPLE_RATE as i64), bad).with_pts(6 * 160);
+        dec.send_packet(&pkt).unwrap();
+        let Frame::Audio(a) = dec.receive_frame().unwrap() else {
+            panic!("audio frame expected");
+        };
+        let plc_energy = frame_energy(&a);
+        assert!(
+            plc_energy > 0.0,
+            "PLC produced a silent block instead of a pitch-synchronous \
+             continuation"
+        );
+        // Bounded above: the dampened continuation cannot exceed a few
+        // times the last good block's energy.
+        assert!(
+            plc_energy < last_good_energy * 4.0 + 1.0,
+            "PLC energy {plc_energy} ran away vs last good {last_good_energy}"
+        );
+    }
+
     #[test]
     fn multiple_frames_have_bounded_output() {
         let mut dec = make_dec();

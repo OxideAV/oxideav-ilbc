@@ -59,8 +59,12 @@ Both directions are structurally complete against RFC 3951:
   §4.2 all-pass phase compensator, 3-stage adaptive-codebook excitation
   with successive-rescaled gain dequantisation, 10th-order LPC synthesis
   with the §4.7 enhancer-delay shift, the §4.6 six-PSSQ
-  pitch-synchronous enhancer, dampened pitch-synchronous PLC for lost /
-  empty-indicated frames, and an opt-in §4.8 65 Hz output high-pass
+  pitch-synchronous enhancer, the §4.5.2 pitch-synchronous packet-loss
+  concealment for lost / empty-indicated frames (correlation analysis of
+  the saved previous excitation → pitch lag + voicing level, then a
+  pitch-synchronous repetition mixed with a voicing-weighted random
+  excitation through the last LP filter, energy-dampened across
+  consecutive losses), and an opt-in §4.8 65 Hz output high-pass
   post-filter (`hp_filter=on` in `CodecParameters::options`).
 - **Encoder** — LPC analysis (asymmetric / Hanning windowing →
   autocorrelation → Levinson-Durbin → 0.9025 chirp expansion → LSF),

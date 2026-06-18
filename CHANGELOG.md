@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- §4.5.2 pitch-synchronous packet-loss concealment. The decoder now saves
+  the entire decoded excitation of each good block (§4.5.1) and, on a lost
+  or empty-indicated frame, runs a normalised-cross-correlation pitch +
+  voicing analysis on that history, then substitutes the lost block with a
+  pitch-synchronous repetition of the previous excitation mixed with a
+  voicing-weighted random excitation (sqrt-power split), filtered through
+  the last LP filter and energy-dampened across consecutive losses.
+  Replaces the previous placeholder attenuated-white-noise fill, so a
+  concealed block now continues the speaker's pitch instead of decaying to
+  comfort noise. New `synthesis::analyse_pitch` plus unit tests
+  (`analyse_pitch_finds_seeded_period`, `conceal_periodic_repeats_pitch`,
+  `conceal_unvoiced_is_aperiodic`) and an end-to-end decoder test
+  (`plc_continues_energy_after_good_voiced_frames`). Implemented from the
+  RFC 3951 §4.5 prose only; the §4.5 PLC is RFC-RECOMMENDED and non-
+  normative ("Exact compliance ... is not needed"), so this is a quality
+  improvement, not a bitstream change.
+
 - `tests/decoder_wellformed.rs`: decoder well-formedness invariants on
   the tonal fixture corpus. Localised the source of the low (13-17 dB)
   `docs_corpus.rs` PSNR on sine / noise / voice-like / DTMF to an
