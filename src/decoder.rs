@@ -81,7 +81,7 @@ fn hp_output_in_place(samples: &mut [f32], state: &mut HpOutputState) -> usize {
 /// Final synthesis-sample → S16 conversion, RFC 3951 §A.2 `iLBC_decode`
 /// output stage (the `decoded_data[k] = (short) dtmp` clamp-then-cast).
 ///
-/// The reference clamps the float synthesis output to the int16 range
+/// RFC 3951 §A.2 clamps the float synthesis output to the int16 range
 /// `[MIN_SAMPLE, MAX_SAMPLE] = [-32768, 32767]` and then performs a C
 /// `(short)` cast, which **truncates toward zero** — it does not round to
 /// nearest. Matching this exactly is what makes the quiet-passage decode

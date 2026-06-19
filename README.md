@@ -123,7 +123,7 @@ fraction (`silence_20ms_is_near_bit_exact` /
 `silence_30ms_is_near_bit_exact`) and a ≤1-LSB max diff so the
 conversion can't regress to round-to-nearest.
 
-Output is **not** bit-exact end-to-end against the RFC 3951 reference on
+Output is **not** bit-exact end-to-end on
 speech / tones (CELP rounding drift in the multi-stage codebook search
 accumulates above the LSB). Each fixture under
 `docs/audio/ilbc/fixtures/` carries a per-case PSNR regression floor
