@@ -450,9 +450,13 @@ fn corpus_mode_20ms_silence() {
         input_file: "input.lbc",
         expected_file: "expected.wav",
         carriage: Carriage::StorageFormat,
-        // Baseline 74.67 dB — silence has nothing for the CELP search
-        // to chase, so this is the tightest floor we can pin.
-        tier: Tier::PsnrFloor(70.0),
+        // Baseline 122.35 dB after the §A.2 clamp-then-truncate output
+        // conversion. Silence has nothing for the CELP search to chase
+        // and our decode is now bit-aligned to the reference on
+        // 99.94 % of samples (the rest drift by exactly 1 LSB), so this
+        // is the tightest floor in the corpus. (Was 74.67 dB / 70.0
+        // floor under round-to-nearest output rounding.)
+        tier: Tier::PsnrFloor(110.0),
     });
 }
 
@@ -487,8 +491,9 @@ fn corpus_mode_30ms_silence() {
         input_file: "input.lbc",
         expected_file: "expected.wav",
         carriage: Carriage::StorageFormat,
-        // Baseline 74.03 dB — see mode-20ms-silence note.
-        tier: Tier::PsnrFloor(70.0),
+        // Baseline 124.52 dB after the §A.2 clamp-then-truncate output
+        // conversion (99.96 % bit-aligned). See mode-20ms-silence note.
+        tier: Tier::PsnrFloor(110.0),
     });
 }
 
@@ -620,6 +625,72 @@ fn corpus_transition_part_b_30ms() {
 /// storage-format file; this fixture is intentionally non-conformant).
 /// We feed each half into a *fresh* decoder, concatenate the PCM, and
 /// score against the shared `expected.wav`.
+/// Pin the §A.2 clamp-then-truncate output conversion at the
+/// exact-sample level. The reference `iLBC_decode` output stage does
+/// `decoded_data[k] = (short) dtmp` after clamping `dtmp` to
+/// `[-32768, 32767]` — a truncation toward zero, not a round-to-nearest.
+/// On near-silent material (where the synthesis output sits within ±1 of
+/// an integer for almost every sample) matching that truncation is the
+/// difference between ~65 % and ~99.9 % bit-aligned output. This test
+/// fails loudly if the conversion ever regresses to round-to-nearest
+/// (which would knock the exact-match fraction back down to ~65-76 %),
+/// independent of the PSNR floor.
+fn silence_exact_fraction(name: &str) -> f64 {
+    let dir = fixture_dir(name);
+    let input = match fs::read(dir.join("input.lbc")) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("skip {name}: {e}");
+            return 1.0;
+        }
+    };
+    let wav = match fs::read(dir.join("expected.wav")) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("skip {name} (wav): {e}");
+            return 1.0;
+        }
+    };
+    let (_, frames) = split_frames(&input, Carriage::StorageFormat);
+    let ours = decode_pcm(&frames).expect("decode silence fixture");
+    let (_, _, _, pcm_bytes) = parse_wav(&wav);
+    let reference: Vec<i16> = pcm_bytes
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let s = score(&ours, &reference);
+    // The truncation conversion can only differ from the reference by a
+    // sub-LSB rounding edge, so the max diff must never exceed 1.
+    assert!(
+        s.max_abs_diff <= 1,
+        "{name}: max|diff|={} > 1 — synthesis itself drifted, not just the cast",
+        s.max_abs_diff
+    );
+    s.n_exact as f64 / s.n as f64
+}
+
+#[test]
+fn silence_20ms_is_near_bit_exact() {
+    let frac = silence_exact_fraction("mode-20ms-silence");
+    assert!(
+        frac >= 0.99,
+        "20 ms silence only {:.4} bit-aligned — output conversion regressed \
+         from §A.2 clamp-then-truncate to round-to-nearest?",
+        frac
+    );
+}
+
+#[test]
+fn silence_30ms_is_near_bit_exact() {
+    let frac = silence_exact_fraction("mode-30ms-silence");
+    assert!(
+        frac >= 0.99,
+        "30 ms silence only {:.4} bit-aligned — output conversion regressed \
+         from §A.2 clamp-then-truncate to round-to-nearest?",
+        frac
+    );
+}
+
 #[test]
 fn corpus_transition_concatenated_raw_with_known_splice() {
     let dir = fixture_dir("transition-mid-stream");

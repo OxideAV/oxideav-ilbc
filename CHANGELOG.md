@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Decoder output conversion now matches the RFC 3951 §A.2 `iLBC_decode`
+  output stage exactly: the float synthesis output is clamped to
+  `[-32768, 32767]` and then **truncated toward zero** (the reference's
+  `decoded_data[k] = (short) dtmp` cast), rather than rounded to nearest.
+  Round-to-nearest drifts by ±1 LSB on every sample whose fractional part
+  crosses 0.5, which is the dominant error on near-silent material. After
+  the fix, the silence fixtures decode bit-aligned to the reference on
+  99.94 % (20 ms) / 99.96 % (30 ms) of samples — up from 64.8 % / 76.0 %
+  — lifting the silence PSNR from ~74 dB to 122-125 dB, and the
+  step-impulse exact-sample fraction from 61.7 % to 94.8 %. New
+  `silence_20ms_is_near_bit_exact` / `silence_30ms_is_near_bit_exact`
+  tests pin the ≥99 % bit-aligned fraction and a ≤1-LSB max diff so the
+  conversion can't regress to round-to-nearest; the silence
+  `docs_corpus` PSNR floors tightened from 70 dB to 110 dB.
+
 ### Added
 
 - §4.5.2 pitch-synchronous packet-loss concealment. The decoder now saves

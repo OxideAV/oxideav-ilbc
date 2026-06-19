@@ -78,6 +78,24 @@ fn hp_output_in_place(samples: &mut [f32], state: &mut HpOutputState) -> usize {
     n
 }
 
+/// Final synthesis-sample → S16 conversion, RFC 3951 §A.2 `iLBC_decode`
+/// output stage (the `decoded_data[k] = (short) dtmp` clamp-then-cast).
+///
+/// The reference clamps the float synthesis output to the int16 range
+/// `[MIN_SAMPLE, MAX_SAMPLE] = [-32768, 32767]` and then performs a C
+/// `(short)` cast, which **truncates toward zero** — it does not round to
+/// nearest. Matching this exactly is what makes the quiet-passage decode
+/// bit-aligned: a round-to-nearest cast drifts by ±1 LSB on every sample
+/// whose fractional part crosses 0.5, which is the dominant error on
+/// near-silent material.
+#[inline]
+fn sample_to_i16(s: f32) -> i16 {
+    // `as i16` on an already-clamped finite f32 truncates toward zero and
+    // is saturation-defined for the endpoints, mirroring the reference
+    // clamp followed by the truncating `(short)` cast.
+    s.clamp(-32768.0, 32767.0) as i16
+}
+
 struct IlbcDecoder {
     codec_id: CodecId,
     lsf_state: LsfState,
@@ -372,7 +390,7 @@ impl Decoder for IlbcDecoder {
 
         let mut bytes = Vec::with_capacity(samples.len() * 2);
         for &s in samples.iter() {
-            let v = s.round().clamp(-32768.0, 32767.0) as i16;
+            let v = sample_to_i16(s);
             bytes.extend_from_slice(&v.to_le_bytes());
         }
         // mode is implicit in `samples.len()` — reference kept so
