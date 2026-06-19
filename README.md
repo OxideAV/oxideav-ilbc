@@ -109,12 +109,26 @@ self-roundtrip signals:
 
 ### Fidelity
 
-Output is **not** bit-exact end-to-end against the RFC 3951 reference
-on speech / tones (CELP rounding drift). Silence is sample-exact on
-65-76 % of samples after the §3.8 ULP layout, with sub-LSB drift on the
-remainder. Each fixture under `docs/audio/ilbc/fixtures/` carries a
-per-case PSNR regression floor anchored 2-3 dB beneath the observed
-PSNR. Workspace policy bars consulting any external iLBC implementation
+The decoder output conversion follows the RFC 3951 §A.2 `iLBC_decode`
+output stage exactly — the float synthesis output is clamped to the
+int16 range `[-32768, 32767]` and then **truncated toward zero** (the
+reference's `(short)` cast), not rounded to nearest. On near-silent
+material this is the difference between drifting ±1 LSB on every sample
+that crosses a `.5` fractional boundary and being bit-aligned: the
+silence fixtures now decode **bit-identical to the reference on 99.94 %
+(20 ms) / 99.96 % (30 ms) of samples** (the remainder drift by exactly
+1 LSB), for ~122-125 dB PSNR, and the step-impulse exact-sample fraction
+is 94.8 %. `tests/docs_corpus.rs` pins the ≥99 % bit-aligned silence
+fraction (`silence_20ms_is_near_bit_exact` /
+`silence_30ms_is_near_bit_exact`) and a ≤1-LSB max diff so the
+conversion can't regress to round-to-nearest.
+
+Output is **not** bit-exact end-to-end against the RFC 3951 reference on
+speech / tones (CELP rounding drift in the multi-stage codebook search
+accumulates above the LSB). Each fixture under
+`docs/audio/ilbc/fixtures/` carries a per-case PSNR regression floor
+anchored 2-3 dB beneath the observed PSNR (the silence floors are pinned
+at 110 dB). Workspace policy bars consulting any external iLBC implementation
 as a clean-room reference, so there is no third-party encoder oracle in
 CI; the decode path is validated against statically captured bitstream
 trace files and against the integer index trace shipped with each
