@@ -183,6 +183,29 @@ pub fn pitch_emphasis_post(samples: &mut [f32; SUBL], mem: &mut f32) {
     }
 }
 
+/// Synthesise an entire frame, sub-block by sub-block, *without* updating
+/// any PLC bookkeeping. Used by both the good-frame path (via
+/// [`synthesise_frame`]) and the residual-domain concealment path, which
+/// manages its own §A.14 state and must not have it clobbered by the
+/// §4.5.1 PCM-domain recording.
+pub fn synthesise_blocks(
+    excitation: &[f32],
+    a_per_sub: &[[f32; LPC_ORDER + 1]],
+    mem: &mut [f32; LPC_ORDER],
+    out: &mut [f32],
+) {
+    let n_sub = a_per_sub.len();
+    debug_assert_eq!(excitation.len(), n_sub * SUBL);
+    debug_assert_eq!(out.len(), n_sub * SUBL);
+    for sb in 0..n_sub {
+        let mut exc = [0.0f32; SUBL];
+        exc.copy_from_slice(&excitation[sb * SUBL..(sb + 1) * SUBL]);
+        let mut y = [0.0f32; SUBL];
+        synthesise(&exc, &a_per_sub[sb], mem, &mut y);
+        out[sb * SUBL..(sb + 1) * SUBL].copy_from_slice(&y);
+    }
+}
+
 /// Synthesise an entire frame, sub-block by sub-block.
 pub fn synthesise_frame(
     excitation: &[f32],
@@ -191,16 +214,7 @@ pub fn synthesise_frame(
     out: &mut [f32],
 ) {
     let n_sub = a_per_sub.len();
-    debug_assert_eq!(excitation.len(), n_sub * SUBL);
-    debug_assert_eq!(out.len(), n_sub * SUBL);
-
-    for sb in 0..n_sub {
-        let mut exc = [0.0f32; SUBL];
-        exc.copy_from_slice(&excitation[sb * SUBL..(sb + 1) * SUBL]);
-        let mut y = [0.0f32; SUBL];
-        synthesise(&exc, &a_per_sub[sb], &mut state.mem, &mut y);
-        out[sb * SUBL..(sb + 1) * SUBL].copy_from_slice(&y);
-    }
+    synthesise_blocks(excitation, a_per_sub, &mut state.mem, out);
     // Cache the last LPC and excitation RMS for PLC use on future frames.
     state.last_a = a_per_sub[n_sub - 1];
     let last_exc = &excitation[(n_sub - 1) * SUBL..];

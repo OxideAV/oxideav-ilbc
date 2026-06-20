@@ -19,7 +19,9 @@ use crate::enhancer::{enhance_frame, EnhancerState};
 use crate::hp_filter::{hp_output, HpOutputState};
 use crate::lsf::{decode_and_interpolate, dequant_lsf, LsfState};
 use crate::state::reconstruct_scalar_state;
-use crate::synthesis::{conceal_frame, synthesise_frame, SynthState};
+use crate::synthesis::{
+    conceal_residual, plc_record_good, synthesise_blocks, synthesise_frame, SynthState,
+};
 use crate::{FrameMode, CB_LMEM, CODEC_ID_STR, LPC_ORDER, SAMPLE_RATE, STATE_LEN, SUBL};
 
 /// Build a boxed [`Decoder`] for iLBC.
@@ -144,8 +146,7 @@ impl IlbcDecoder {
         // Empty-frame flag: §3.8 — if set, the decoder SHOULD treat the
         // block as lost and run PLC.
         if fp.empty_flag {
-            conceal_frame(&mut self.synth, fp.mode, out);
-            self.enhancer.prev_enh_pl = 1;
+            self.conceal_into(fp.mode, out);
             return Ok(());
         }
 
@@ -325,11 +326,75 @@ impl IlbcDecoder {
 
         // Synthesise from the enhanced excitation.
         synthesise_frame(&enhanced, &shifted_a, &mut self.synth, out);
+
+        // §4.5.1 / §A.44 "preparing the plc for a future loss": record the
+        // *unenhanced* decoded residual and the frame's final LP filter so
+        // a following lost block can be concealed in the residual domain.
+        // §A.44 passes `syntdenum + (nsub-1)` — the last sub-block's LPC.
+        plc_record_good(&mut self.synth, &excitation, &a_per_sub[n_sub - 1]);
+
         // Cache the current frame's LPC rows so the next frame's first
         // sub-blocks can use them per the enhancer-delay shift above.
         self.old_a_per_sub = a_per_sub;
         self.enhancer.prev_enh_pl = 0;
         Ok(())
+    }
+
+    /// Conceal a lost / empty-indicated frame in the residual domain
+    /// (RFC 3951 §4.5.2 via [`conceal_residual`]) and run the concealed
+    /// excitation through the same §4.6 enhancer + §4.7 LPC synthesis path
+    /// as a received frame, mirroring the §A.44 decoder driver's `mode==0`
+    /// branch: the §A.14 PLC produces a residual + reuses the previous
+    /// block's LP filter for every sub-block, then `enhancerInterface` and
+    /// `syntFilter` run exactly as for a good block.
+    fn conceal_into(&mut self, mode: FrameMode, out: &mut [f32]) {
+        let n_sub = mode.sub_blocks();
+        let n = mode.samples();
+
+        // §A.14 / §A.44: the concealment lag is the pitch lag the enhancer
+        // reported on the last good block (`iLBCdec_inst->last_lag`).
+        let inlag = self.enhancer.last_lag;
+        let mut residual = vec![0.0f32; n];
+        conceal_residual(&mut self.synth, mode, inlag, &mut residual);
+
+        // §A.44: a concealed frame reuses the previous block's LP filter
+        // (`prevLpc`, == synth.last_a after plc_record_good / conceal) for
+        // *all* sub-blocks of the substituted frame.
+        let plc_a = self.synth.last_a;
+        let a_per_sub = vec![plc_a; n_sub];
+
+        // Run the concealed residual through the enhancer just like a
+        // received block so a subsequent good frame merges smoothly
+        // (§4.5.3) via the enhancer's cross-block correlation.
+        let mut enhanced = vec![0.0f32; n];
+        enhance_frame(&mut self.enhancer, mode, &residual, &mut enhanced);
+
+        // Enhancer-delay-shifted synthesis, identical structure to the
+        // good-frame path but with the single reused LP filter.
+        let shift = match mode {
+            FrameMode::Ms20 => 1usize,
+            FrameMode::Ms30 => 2usize,
+        };
+        let mut shifted_a = Vec::with_capacity(n_sub);
+        for i in 0..n_sub {
+            if i < shift {
+                let off = i + n_sub - shift;
+                let row = self.old_a_per_sub.get(off).copied().unwrap_or(plc_a);
+                shifted_a.push(row);
+            } else {
+                shifted_a.push(a_per_sub[i - shift]);
+            }
+        }
+        // Filter without the §4.5.1 PCM-domain bookkeeping so the §A.14
+        // residual-domain state set by `conceal_residual` (consPLICount,
+        // prevPLI, prevLag, per, prevResidual) survives intact for the
+        // next consecutive loss.
+        synthesise_blocks(&enhanced, &shifted_a, &mut self.synth.mem, out);
+
+        // The concealed frame's LP filter becomes the previous-frame LPC
+        // for the next frame's enhancer-delay shift.
+        self.old_a_per_sub = a_per_sub;
+        self.enhancer.prev_enh_pl = 1;
     }
 }
 
@@ -368,7 +433,7 @@ impl Decoder for IlbcDecoder {
                 // Zero-byte packet: treat as a 20 ms concealment frame.
                 let m = FrameMode::Ms20;
                 let mut out = vec![0.0f32; m.samples()];
-                conceal_frame(&mut self.synth, m, &mut out);
+                self.conceal_into(m, &mut out);
                 (m, out)
             }
             None => {

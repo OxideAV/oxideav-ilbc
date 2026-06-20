@@ -29,6 +29,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   taper, consecutive-loss attenuation, 30 dB noise fallback, and the
   state recording).
 
+### Changed
+
+- The decoder now conceals lost / empty-indicated frames through the
+  residual-domain §A.14 path instead of the PCM-domain concealer: the
+  concealed excitation is produced by `conceal_residual`, reuses the
+  previous block's LP filter for every sub-block (per §A.44's `mode==0`
+  branch), and is run through the §4.6 enhancer + §4.7 synthesis exactly
+  as a received block, so a recovered frame merges smoothly (§4.5.3) via
+  the enhancer's cross-block correlation. Every received frame records its
+  decoded residual + final LP filter for a future loss. The standalone
+  PCM-domain `conceal_frame` remains in the public API for compatibility.
+  New `tests/plc.rs` drives genuine fixture bitstreams with simulated
+  frame loss and pins consecutive-loss attenuation, single-loss recovery
+  bounded energy, and first-frame-loss safety.
+
 ### Fixed
 
 - Decoder output conversion now matches the RFC 3951 §A.2 `iLBC_decode`
