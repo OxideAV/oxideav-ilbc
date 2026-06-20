@@ -59,13 +59,18 @@ Both directions are structurally complete against RFC 3951:
   §4.2 all-pass phase compensator, 3-stage adaptive-codebook excitation
   with successive-rescaled gain dequantisation, 10th-order LPC synthesis
   with the §4.7 enhancer-delay shift, the §4.6 six-PSSQ
-  pitch-synchronous enhancer, the §4.5.2 pitch-synchronous packet-loss
-  concealment for lost / empty-indicated frames (correlation analysis of
-  the saved previous excitation → pitch lag + voicing level, then a
-  pitch-synchronous repetition mixed with a voicing-weighted random
-  excitation through the last LP filter, energy-dampened across
-  consecutive losses), and an opt-in §4.8 65 Hz output high-pass
-  post-filter (`hp_filter=on` in `CodecParameters::options`).
+  pitch-synchronous enhancer, the §4.5 residual-domain packet-loss
+  concealment following the Appendix A.14 `doThePLC` example (a ±3
+  `compCorr` pitch-refinement search around the enhancer's pitch lag, the
+  `pitchfact` voicing mix, `use_lag` short-lag doubling, the
+  delayed-copy `randlag` noise component with the §A.14 `seed·69069+1`
+  LCG, the `use_gain` consecutive-loss energy ladder, the per-80-sample
+  1.0 / 0.95 / 0.9 intra-block taper, and the 30 dB pure-noise fallback)
+  — the concealed *excitation* is run through the same enhancer + LPC
+  synthesis as a received block so a recovered frame merges smoothly
+  (§4.5.3) via the enhancer's cross-block correlation — and an opt-in
+  §4.8 65 Hz output high-pass post-filter (`hp_filter=on` in
+  `CodecParameters::options`).
 - **Encoder** — LPC analysis (asymmetric / Hanning windowing →
   autocorrelation → Levinson-Durbin → 0.9025 chirp expansion → LSF),
   split-VQ LSF quantisation, scalar start-state coding with the §3.5.1
@@ -148,6 +153,19 @@ the reference WAVs do exhibit the clipping anomaly — so a future change
 can't silently "improve" the corpus PSNR by chasing the broken
 reference into an unstable, clipping decode, and a re-captured corpus
 flags the floors for re-anchoring.
+
+### Packet-loss concealment
+
+Lost frames are signalled to the decoder either by a packet whose §3.8
+empty-frame indicator bit is set or by a zero-byte packet. Both route to
+the §4.5 residual-domain concealer (Appendix A.14 `doThePLC`): the lost
+block's *excitation* is reconstructed from the previous block's saved
+residual and the previous LP filter, then enhanced and synthesised on the
+normal decode path. `tests/plc.rs` drives genuine fixture bitstreams with
+simulated loss and pins the observable §A.14 behaviour — consecutive
+losses dampen per the `use_gain` ladder, a single loss recovers within a
+few frames without diverging, and losing the first frame (no saved
+residual) is bounded.
 
 ## RTP payload format (RFC 3952)
 
