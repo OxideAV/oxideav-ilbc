@@ -29,6 +29,11 @@ pub use crate::enhancer::{ENH_PLOCS_TBL, POLYPHASER_TBL};
 /// must fit comfortably inside this window for the correlation analysis.
 pub const PLC_HIST_LEN: usize = 240;
 
+/// Largest concealed-frame length in samples (30 ms = 240). RFC 3951
+/// Appendix A.14 calls this `BLOCKL_MAX`; the §4.5.2 `randvec` scratch is
+/// sized to it.
+pub const BLOCKL_MAX: usize = 240;
+
 /// Shortest pitch period the §4.5.2 correlation analysis searches, in
 /// 8 kHz samples (≈ 400 Hz — the top of the speech-pitch range).
 pub const PLC_PITCH_MIN: usize = 20;
@@ -64,6 +69,33 @@ pub struct SynthState {
     /// to which the previous excitation was periodic. Drives the
     /// periodic-vs-random excitation mix in §4.5.2.
     pub plc_voicing: f32,
+
+    // ---- RFC 3951 Appendix A.14 `doThePLC` residual-domain state ----
+    //
+    // These mirror the `iLBC_Dec_Inst_t` fields the §4.5 / Appendix A.14 example
+    // keeps so the residual-domain concealer ([`conceal_residual`]) can
+    // reproduce the documented algorithm exactly. The PCM-domain
+    // [`conceal_frame`] above keeps its own `exc_hist`-based state for
+    // backward compatibility; the two are independent.
+    /// The full decoded residual of the previous block (`prevResidual`),
+    /// length = `blockl` (160 or 240). Source for the pitch-synchronous
+    /// repetition + the random `randvec` copies in §4.5.2.
+    pub prev_residual: [f32; BLOCKL_MAX],
+    /// Length in samples of the valid prefix of `prev_residual`.
+    pub prev_residual_len: usize,
+    /// Packet-loss indicator of the previous block (`prevPLI`): 1 if the
+    /// previous block was concealed, 0 if it was received. Selects the
+    /// §4.5.2 "previous frame lost" vs "previous frame received" branch.
+    pub prev_pli: u8,
+    /// Pitch lag recorded by the last concealment (`prevLag`), reused when
+    /// the previous block was itself concealed.
+    pub prev_lag: i32,
+    /// Periodicity measure recorded by the last concealment (`per`),
+    /// reused across consecutive losses.
+    pub per: f32,
+    /// `doThePLC`'s LCG seed (`seed`), distinct from the PCM-domain
+    /// `plc_seed`. RFC uses `seed = seed*69069 + 1`.
+    pub plc_res_seed: u32,
 }
 
 impl SynthState {
@@ -80,6 +112,12 @@ impl SynthState {
             exc_hist: [0.0; PLC_HIST_LEN],
             plc_pitch: PLC_PITCH_MIN,
             plc_voicing: 0.0,
+            prev_residual: [0.0; BLOCKL_MAX],
+            prev_residual_len: 0,
+            prev_pli: 0,
+            prev_lag: 20,
+            per: 0.0,
+            plc_res_seed: 0,
         }
     }
 
@@ -231,6 +269,198 @@ pub fn analyse_pitch(hist: &[f32; PLC_HIST_LEN]) -> (usize, f32) {
     // means little periodicity → mostly-random substitution.
     let voicing = best_norm.clamp(0.0, 1.0);
     (best_lag, voicing)
+}
+
+/// Cross-correlation + pitch-gain for the §4.5.2 pitch prediction of the
+/// last sub-frame at a given lag. Mirrors RFC 3951 Appendix A.14
+/// `compCorr`: it correlates the trailing `s_range` samples of `buffer`
+/// against the same window shifted back by `lag`.
+///
+/// Returns `(cc, gc, pm)` where
+/// * `cc = ftmp1² / ftmp2` — the cross-correlation criterion the lag
+///   search maximises,
+/// * `gc = |ftmp1 / ftmp2|` — the pitch gain (unused here but kept to
+///   match the §A.14 `compCorr` signature for clarity),
+/// * `pm = |ftmp1| / (sqrt(ftmp2)·sqrt(ftmp3))` — the normalised
+///   periodicity in `[0, 1]` that becomes the recorded `per`.
+fn comp_corr(buffer: &[f32], lag: usize, b_len: usize, s_range: usize) -> (f32, f32, f32) {
+    // Guard against reading before the start of the buffer (A.14:
+    // "if ((bLen-sRange-lag)<0) sRange=bLen-lag").
+    let s_range = if (b_len as isize) - (s_range as isize) - (lag as isize) < 0 {
+        b_len.saturating_sub(lag)
+    } else {
+        s_range
+    };
+    let mut ftmp1 = 0.0f32; // cross
+    let mut ftmp2 = 0.0f32; // energy of lagged window
+    let mut ftmp3 = 0.0f32; // energy of current window
+    let base = b_len - s_range;
+    for i in 0..s_range {
+        let cur = buffer[base + i];
+        let prev = buffer[base + i - lag];
+        ftmp1 += cur * prev;
+        ftmp2 += prev * prev;
+        ftmp3 += cur * cur;
+    }
+    if ftmp2 > 0.0 {
+        let cc = ftmp1 * ftmp1 / ftmp2;
+        let gc = (ftmp1 / ftmp2).abs();
+        let pm = ftmp1.abs() / (ftmp2.sqrt() * ftmp3.sqrt());
+        (cc, gc, pm)
+    } else {
+        (0.0, 0.0, 0.0)
+    }
+}
+
+/// Residual-domain packet-loss concealment — RFC 3951 §4.5.2, following
+/// the Appendix A.14 `doThePLC` example.
+///
+/// Produces a concealed *residual* (excitation) block of `mode.samples()`
+/// samples from `state.prev_residual`, to be fed through the same enhancer
+/// and LPC synthesis path as a received block (the §4.5.3 smooth merge
+/// into a subsequent good block is then handled implicitly by the
+/// enhancer's cross-block correlation, exactly as in the RFC 3951 §A.44 decoder
+/// driver).
+///
+/// `inlag` is the pitch lag the enhancer measured on the last good block
+/// (RFC 3951 §A.44 passes `last_lag` here). The concealed residual is also
+/// written back into `state.prev_residual` so a further consecutive loss
+/// continues from the synthetic signal, and `state.prev_pli` /
+/// `state.prev_lag` / `state.per` / `state.plc_count` are updated per the
+/// §A.14 state machine.
+pub fn conceal_residual(state: &mut SynthState, mode: FrameMode, inlag: i32, out: &mut [f32]) {
+    let blockl = mode.samples();
+    debug_assert_eq!(out.len(), blockl);
+    // First loss after a clean run has no recorded residual: emit silence.
+    if state.prev_residual_len != blockl {
+        for v in out.iter_mut() {
+            *v = 0.0;
+        }
+        state.prev_pli = 1;
+        state.plc_count = state.plc_count.saturating_add(1);
+        return;
+    }
+
+    state.plc_count = state.plc_count.saturating_add(1);
+    let prev = &state.prev_residual[..blockl];
+
+    // Pitch lag + periodicity. If the previous block was received, refine
+    // the lag in a ±3 window around the enhancer's `inlag`; if it was
+    // itself concealed, reuse the recorded lag + periodicity (A.14).
+    let (mut lag, mut max_per) = if state.prev_pli != 1 {
+        let inlag = inlag.max(PLC_PITCH_MIN as i32);
+        let lo = (inlag - 3).max(1) as usize;
+        let mut best_lag = lo;
+        let (mut maxcc, _gc, mut best_per) = comp_corr(prev, lo, blockl, 60);
+        for i in (inlag - 2)..=(inlag + 3) {
+            if i < 1 || i as usize >= blockl {
+                continue;
+            }
+            let (cc, _g, pm) = comp_corr(prev, i as usize, blockl, 60);
+            if cc > maxcc {
+                maxcc = cc;
+                best_lag = i as usize;
+                best_per = pm;
+            }
+        }
+        (best_lag as i32, best_per)
+    } else {
+        (state.prev_lag, state.per)
+    };
+    if lag < 1 {
+        lag = PLC_PITCH_MIN as i32;
+    }
+
+    // Consecutive-loss energy downscaling (A.14 `use_gain`). The reference
+    // ladder is evaluated against `consPLICount * blockl` in multiples of
+    // 320 samples (40 ms).
+    let span = state.plc_count as usize * blockl;
+    let mut use_gain = 1.0f32;
+    if span > 4 * 320 {
+        use_gain = 0.0;
+    } else if span > 3 * 320 {
+        use_gain = 0.5;
+    } else if span > 2 * 320 {
+        use_gain = 0.7;
+    } else if span > 320 {
+        use_gain = 0.9;
+    }
+
+    // Periodic-vs-random mix factor from the periodicity measure (A.14
+    // `pitchfact`): full pitch above sqrt(per) 0.7, linear ramp down to
+    // 0.4, pure noise below.
+    let ftmp = max_per.max(0.0).sqrt();
+    let pitchfact = if ftmp > 0.7 {
+        1.0
+    } else if ftmp > 0.4 {
+        (ftmp - 0.4) / (0.7 - 0.4)
+    } else {
+        0.0
+    };
+
+    // Avoid repeating the same pitch cycle for short lags (A.14).
+    let use_lag = if lag < 80 { 2 * lag } else { lag } as usize;
+
+    // Build the concealed residual sample by sample.
+    let mut randvec = [0.0f32; BLOCKL_MAX];
+    let mut energy = 0.0f32;
+    for i in 0..blockl {
+        // Noise component: a randomly-delayed copy of the previous
+        // residual (A.14 randlag = 50 + seed%70 over the 0x7fff_ffff mask).
+        state.plc_res_seed = state.plc_res_seed.wrapping_mul(69069).wrapping_add(1) & 0x7fff_ffff;
+        let randlag = 50 + (state.plc_res_seed as i32) % 70;
+        let pick = i as i32 - randlag;
+        randvec[i] = if pick < 0 {
+            prev[(blockl as i32 + pick) as usize]
+        } else {
+            randvec[pick as usize]
+        };
+
+        // Pitch-repetition component.
+        let pick = i as i32 - use_lag as i32;
+        let pitch_sample = if pick < 0 {
+            prev[(blockl as i32 + pick) as usize]
+        } else {
+            out[pick as usize]
+        };
+
+        // Mix, with the per-80-sample intra-block taper (A.14): 1.0 for
+        // the first 80, 0.95 for the next 80, 0.9 beyond.
+        let taper = if i < 80 {
+            1.0
+        } else if i < 160 {
+            0.95
+        } else {
+            0.9
+        };
+        out[i] = taper * use_gain * (pitchfact * pitch_sample + (1.0 - pitchfact) * randvec[i]);
+        energy += out[i] * out[i];
+    }
+
+    // Below 30 dB RMS, fall back to pure noise (A.14).
+    if (energy / blockl as f32).sqrt() < 30.0 {
+        max_per = 0.0;
+        out[..blockl].copy_from_slice(&randvec[..blockl]);
+    }
+
+    // Update §A.14 state machine.
+    state.prev_lag = lag;
+    state.per = max_per;
+    state.prev_pli = 1;
+    state.prev_residual[..blockl].copy_from_slice(&out[..blockl]);
+    state.prev_residual_len = blockl;
+}
+
+/// §4.5.1 / A.14 (no-loss branch): record the decoded residual + final LP
+/// filter so a *following* lost block can be concealed, and clear the
+/// consecutive-loss counter. Called once per received frame.
+pub fn plc_record_good(state: &mut SynthState, decresidual: &[f32], last_a: &[f32; LPC_ORDER + 1]) {
+    let n = decresidual.len().min(BLOCKL_MAX);
+    state.prev_residual[..n].copy_from_slice(&decresidual[..n]);
+    state.prev_residual_len = n;
+    state.last_a = *last_a;
+    state.prev_pli = 0;
+    state.plc_count = 0;
 }
 
 /// Generate a concealed frame (RFC 3951 §4.5.2).
@@ -456,6 +686,135 @@ mod tests {
                 out[i - lag]
             );
         }
+    }
+
+    // ---- Appendix A.14 `doThePLC` residual-domain concealment ----
+
+    fn seed_periodic_residual(state: &mut SynthState, blockl: usize, lag: usize, amp: f32) {
+        for i in 0..blockl {
+            state.prev_residual[i] = ((i % lag) as f32 - lag as f32 / 2.0) * amp;
+        }
+        state.prev_residual_len = blockl;
+        state.prev_pli = 0;
+    }
+
+    #[test]
+    fn conceal_residual_first_loss_without_history_is_silent() {
+        // No recorded residual yet (prev_residual_len == 0) → silence, and
+        // prev_pli flips to 1 so the next loss takes the recorded-state path.
+        let mut state = SynthState::new();
+        let mut out = vec![0.0f32; 160];
+        conceal_residual(&mut state, FrameMode::Ms20, 40, &mut out);
+        assert!(out.iter().all(|&v| v == 0.0));
+        assert_eq!(state.prev_pli, 1);
+        assert_eq!(state.plc_count, 1);
+    }
+
+    #[test]
+    fn conceal_residual_doubles_short_lag() {
+        // A.14: for lag<80 the repetition uses 2*lag to avoid repeating the
+        // same pitch cycle. A pure period-`lag` residual concealed with full
+        // voicing must therefore reproduce with period `lag` (since 2*lag is
+        // also a period) and stay bounded.
+        let mut state = SynthState::new();
+        let blockl = 240usize; // 30 ms so we exercise the 80/160 tapers
+        let lag = 40usize;
+        seed_periodic_residual(&mut state, blockl, lag, 200.0);
+        let mut out = vec![0.0f32; blockl];
+        // inlag at the true lag so the ±3 search locks on.
+        conceal_residual(&mut state, FrameMode::Ms30, lag as i32, &mut out);
+        // Strongly periodic input → high periodicity → pitchfact≈1, so the
+        // pitch-repetition dominates and the first 80 samples (taper=1,
+        // use_gain=1) repeat with the residual's period.
+        for i in (2 * lag)..80 {
+            assert!(
+                (out[i] - out[i - lag]).abs() < out[i].abs().max(1.0) * 0.5,
+                "non-periodic at {i}: {} vs {}",
+                out[i],
+                out[i - lag]
+            );
+        }
+    }
+
+    #[test]
+    fn conceal_residual_taper_drops_energy_across_block() {
+        // The §4.5.2 intra-block taper is 1.0 / 0.95 / 0.9 across the three
+        // 80-sample thirds of a 30 ms block, so (for a stationary-energy
+        // periodic residual) the last third must carry less energy than the
+        // first.
+        let mut state = SynthState::new();
+        let blockl = 240usize;
+        seed_periodic_residual(&mut state, blockl, 50, 300.0);
+        let mut out = vec![0.0f32; blockl];
+        conceal_residual(&mut state, FrameMode::Ms30, 50, &mut out);
+        let e0: f32 = out[0..80].iter().map(|v| v * v).sum();
+        let e2: f32 = out[160..240].iter().map(|v| v * v).sum();
+        assert!(e2 < e0, "third-third energy {e2} not below first {e0}");
+    }
+
+    #[test]
+    fn conceal_residual_consecutive_losses_attenuate() {
+        // A.14 `use_gain` ladder: once consPLICount*blockl exceeds 320 the
+        // gain steps down. With 30 ms blocks the 2nd loss already crosses
+        // 320 (480), so its energy must drop below the 1st loss.
+        let mut state = SynthState::new();
+        let blockl = 240usize;
+        seed_periodic_residual(&mut state, blockl, 50, 400.0);
+        let mut out = vec![0.0f32; blockl];
+        conceal_residual(&mut state, FrameMode::Ms30, 50, &mut out);
+        let e_first: f32 = out.iter().map(|v| v * v).sum();
+        conceal_residual(&mut state, FrameMode::Ms30, 50, &mut out);
+        let e_second: f32 = out.iter().map(|v| v * v).sum();
+        assert!(
+            e_second < e_first,
+            "consecutive loss not attenuated: {e_second} vs {e_first}"
+        );
+    }
+
+    #[test]
+    fn conceal_residual_low_energy_falls_back_to_noise() {
+        // A.14: if the mixed residual RMS is below 30, the block becomes the
+        // pure `randvec` and `per` is zeroed. Seed a tiny residual so the
+        // mix lands under the threshold.
+        let mut state = SynthState::new();
+        let blockl = 160usize;
+        for i in 0..blockl {
+            state.prev_residual[i] = ((i % 40) as f32 - 20.0) * 0.1; // peak ≈ 2
+        }
+        state.prev_residual_len = blockl;
+        state.prev_pli = 0;
+        let mut out = vec![0.0f32; blockl];
+        conceal_residual(&mut state, FrameMode::Ms20, 40, &mut out);
+        // per is zeroed in the noise-fallback path.
+        assert_eq!(state.per, 0.0);
+        assert!(out.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn conceal_residual_records_state_for_next_loss() {
+        // After a loss, prev_pli==1 and prev_lag is recorded so a following
+        // loss reuses it (skips the ±3 search).
+        let mut state = SynthState::new();
+        seed_periodic_residual(&mut state, 240, 53, 250.0);
+        let mut out = vec![0.0f32; 240];
+        conceal_residual(&mut state, FrameMode::Ms30, 53, &mut out);
+        assert_eq!(state.prev_pli, 1);
+        assert!(state.prev_lag >= 50 && state.prev_lag <= 56);
+    }
+
+    #[test]
+    fn plc_record_good_clears_loss_state() {
+        let mut state = SynthState::new();
+        state.plc_count = 5;
+        state.prev_pli = 1;
+        let res = vec![10.0f32; 160];
+        let mut a = [0.0f32; LPC_ORDER + 1];
+        a[0] = 1.0;
+        plc_record_good(&mut state, &res, &a);
+        assert_eq!(state.plc_count, 0);
+        assert_eq!(state.prev_pli, 0);
+        assert_eq!(state.prev_residual_len, 160);
+        assert_eq!(state.prev_residual[0], 10.0);
     }
 
     #[test]

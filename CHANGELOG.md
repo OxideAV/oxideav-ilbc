@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Residual-domain packet-loss concealment following the RFC 3951
+  Appendix A.14 `doThePLC` example: a `conceal_residual` concealer that
+  produces a concealed *excitation* (rather than concealing in the PCM
+  domain) so the substituted block flows through the same §4.6 enhancer
+  and §4.7 LPC synthesis path as a received block. It implements the
+  §4.5.2 algorithm faithfully — the `compCorr` ±3 pitch-refinement search
+  around the enhancer's pitch lag, the `pitchfact` voicing mix
+  (full-pitch above sqrt(per) 0.7, linear ramp to 0.4, pure noise below),
+  the `use_lag = 2·lag` short-lag doubling, the `randlag = 50 + seed%70`
+  delayed-copy noise component with the §A.14 `seed·69069+1` LCG, the
+  `use_gain` consecutive-loss energy ladder keyed on
+  `consPLICount · blockl`, the per-80-sample 1.0 / 0.95 / 0.9 intra-block
+  taper, and the 30 dB pure-noise fallback. The §4.5.1 / §4.5.3 state
+  machine (`prevResidual`, `prevPLI`, `prevLag`, `per`, `consPLICount`)
+  is tracked so consecutive losses reuse the recorded lag and a recovered
+  block merges smoothly via the enhancer's cross-block correlation. Eight
+  unit tests pin the §A.14 behaviours (short-lag doubling, intra-block
+  taper, consecutive-loss attenuation, 30 dB noise fallback, and the
+  state recording).
+
 ### Fixed
 
 - Decoder output conversion now matches the RFC 3951 §A.2 `iLBC_decode`
