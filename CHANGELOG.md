@@ -55,6 +55,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The §4.6 enhancer constraint `b` (`ENH_ALPHA0`) now uses the
+  normative RFC 3951 §4.6.4 spec value `0.05`; an earlier round had
+  tuned it down to `0.005` to maximise the self-referential
+  synthetic-roundtrip SNR. Every reference-fixture PSNR floor
+  (`docs_corpus.rs`) passes at the spec value, so the spec value is
+  authoritative. The `round_trip_snr.rs` synthetic SNR floors — which
+  measure our-encoder → our-decoder consistency rather than reference
+  conformance — were re-anchored ~1 dB beneath the spec-value
+  measurements (sine 20 ms 22.57, sine 30 ms 27.13, voiced 20 ms 22.41,
+  voiced 30 ms 26.33 dB).
+
 - The decoder now conceals lost / empty-indicated frames through the
   residual-domain §A.14 path instead of the PCM-domain concealer: the
   concealed excitation is produced by `conceal_residual`, reuses the

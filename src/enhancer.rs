@@ -50,10 +50,12 @@ pub const ENH_NBLOCKS_EXTRA: usize = 5;
 pub const ENH_NBLOCKS_TOT: usize = ENH_NBLOCKS + ENH_NBLOCKS_EXTRA;
 /// Enhancer buffer length (= 640).
 pub const ENH_BUFL: usize = ENH_NBLOCKS_TOT * ENH_BLOCKL;
-/// Maximum enhancement energy fraction (RFC 3951 §4.6.4 — `b` in the
-/// constraint `e < b * ||pssq(0)||^2`). Lower values keep the enhanced
-/// excitation closer to the unenhanced residual; the RFC value is 0.05.
-pub const ENH_ALPHA0: f32 = 0.005;
+/// Maximum enhancement energy fraction — `b` in the RFC 3951 §4.6.4
+/// Constraint 1 `e < (b * ||pssq(0)||^2), where b=0.05`. This is the
+/// normative spec value; the larger `b` admits more of the
+/// pitch-synchronous smoothed excitation before the §4.6.5 Lagrange
+/// fallback kicks in.
+pub const ENH_ALPHA0: f32 = 0.05;
 
 /// Polyphase (4-phase) interpolation filter, 7 taps per phase =
 /// 4·7 = 28 total. Verbatim from RFC 3951 Appendix A.8 `polyphaserTbl`.
@@ -757,14 +759,15 @@ mod tests {
     }
 
     #[test]
-    fn enh_alpha0_locked_to_round21_value() {
-        // Round-21 sweep selected ENH_ALPHA0 = 0.005 as the balanced
-        // sweet spot across sine + voiced @ 20/30 ms (see CHANGELOG and
-        // README). Lock in the value so future drift is caught: bumping
-        // it back to RFC's 0.05 regresses voiced-20 SNR by ~2.3 dB.
+    fn enh_alpha0_is_rfc_spec_value() {
+        // RFC 3951 §4.6.4 Constraint 1: `e < (b * ||pssq(0)||^2), where
+        // b=0.05`. Round 382 restored the normative spec value (a prior
+        // round had tuned it down to 0.005 to game the self-referential
+        // synthetic-roundtrip SNR; every reference-fixture PSNR floor
+        // passes at the spec value, so the spec value is authoritative).
         assert!(
-            (ENH_ALPHA0 - 0.005).abs() < 1e-6,
-            "ENH_ALPHA0 changed from round-21 calibration: {ENH_ALPHA0}"
+            (ENH_ALPHA0 - 0.05).abs() < 1e-6,
+            "ENH_ALPHA0 must be the RFC 3951 §4.6.4 spec value 0.05: {ENH_ALPHA0}"
         );
     }
 

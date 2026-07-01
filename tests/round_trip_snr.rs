@@ -4,12 +4,20 @@
 //! the iLBC encoder and runs the output packets back through the
 //! decoder. Reports SNR in dB for both 20 ms and 30 ms modes.
 //!
-//! Round 21 floor (after the §4.6.4 enhancer-constraint sweep that
-//! reduced `ENH_ALPHA0` from 0.05 → 0.005):
-//!   - sine    20 ms ≥ 25.5 dB
-//!   - sine    30 ms ≥ 28   dB
-//!   - voiced  20 ms ≥ 24   dB
-//!   - voiced  30 ms ≥ 25.5 dB
+//! These SNR floors measure the *self-referential* our-encoder →
+//! our-decoder round-trip, not conformance against a reference decoder
+//! (the workspace bars any external iLBC oracle). The reference
+//! conformance floors live in `docs_corpus.rs` (fixture PSNR).
+//!
+//! Round 382 restored the §4.6.4 enhancer constraint to its normative
+//! spec value `b = 0.05` (a prior round had tuned it to 0.005 to game
+//! these synthetic floors). The spec-correct enhancer trades ~1-2.6 dB
+//! of this synthetic SNR; every reference-fixture PSNR floor still
+//! passes. Re-anchored floors:
+//!   - sine    20 ms ≥ 21.5 dB  (observed 22.57)
+//!   - sine    30 ms ≥ 26.0 dB  (observed 27.13)
+//!   - voiced  20 ms ≥ 21.0 dB  (observed 22.41)
+//!   - voiced  30 ms ≥ 25.0 dB  (observed 26.33)
 
 use oxideav_core::{
     AudioFrame, CodecId, CodecOptions, CodecParameters, Frame, Packet, SampleFormat, TimeBase,
@@ -158,8 +166,12 @@ fn round_trip_sine_20ms() {
     // forward+backward CB walk has different memory dynamics than the
     // pre-r23 all-forward path and trades 2 dB of sine-tone SNR for
     // +0.5/+1.4 dB of voiced-speech SNR (see voiced 20/30 ms tests).
-    // Round 21: 25.97 dB → Round 23: 23.89 dB. Lock in 23.0 dB.
-    assert!(snr > 23.0, "20 ms sine SNR below 23.0 dB target: {}", snr);
+    // Round 382: §4.6.4 enhancer constraint restored to the spec value
+    // b=0.05 (was 0.005); the spec-correct enhancer trades ~1.3 dB of
+    // this self-referential our-encoder→our-decoder sine SNR (23.89 →
+    // 22.57 dB) while every reference-fixture PSNR floor still passes.
+    // Lock in 21.5 dB.
+    assert!(snr > 21.5, "20 ms sine SNR below 21.5 dB target: {}", snr);
 }
 
 /// Per-frame best-lag SNR average, skipping warm-up frames. This is
@@ -210,8 +222,9 @@ fn round_trip_voiced_20ms() {
     );
     // Round 23 floor: §3.5.1 variable start_idx improves voiced 20 ms
     // 24.56 → 25.01 dB (state span tracks the voiced excitation peak).
-    // Lock in 24.5 dB to catch regressions while leaving headroom.
-    assert!(avg > 24.5, "20 ms voiced SNR below 24.5 dB target: {}", avg);
+    // Round 382: spec-value b=0.05 enhancer constraint softens this
+    // self-referential voiced SNR 25.01 → 22.41 dB. Lock in 21.0 dB.
+    assert!(avg > 21.0, "20 ms voiced SNR below 21.0 dB target: {}", avg);
 }
 
 #[test]
@@ -229,8 +242,10 @@ fn round_trip_voiced_30ms() {
     // Round 23 floor: §3.5.1 variable start_idx improves voiced 30 ms
     // 25.73 → 27.08 dB (the centre 80-sample state span tracks the
     // voiced peak, and the symmetric forward+backward CB walk uses
-    // memory dynamics tuned for spec-correct decode). Lock in 26.5 dB.
-    assert!(avg > 26.5, "30 ms voiced SNR below 26.5 dB target: {}", avg);
+    // memory dynamics tuned for spec-correct decode).
+    // Round 382: spec-value b=0.05 enhancer constraint softens this
+    // self-referential voiced SNR 27.08 → 26.33 dB. Lock in 25.0 dB.
+    assert!(avg > 25.0, "30 ms voiced SNR below 25.0 dB target: {}", avg);
 }
 
 #[test]
@@ -243,7 +258,8 @@ fn round_trip_sine_30ms() {
     let snr = best_snr_db(&pcm[skip..], aligned, 240);
     println!("round_trip_30ms_sine: best-lag SNR = {:.2} dB", snr);
     // Round 23 floor: §3.5.1 variable start_idx softens the steady-sine
-    // SNR (FrameClassify picks centre window) — 29.42 → 28.57 dB. Lock
-    // in 28.0 dB.
-    assert!(snr > 28.0, "30 ms sine SNR below 28 dB target: {}", snr);
+    // SNR (FrameClassify picks centre window) — 29.42 → 28.57 dB.
+    // Round 382: spec-value b=0.05 enhancer constraint softens this
+    // self-referential sine SNR 28.57 → 27.13 dB. Lock in 26.0 dB.
+    assert!(snr > 26.0, "30 ms sine SNR below 26.0 dB target: {}", snr);
 }

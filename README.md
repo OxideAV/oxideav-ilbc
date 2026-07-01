@@ -109,8 +109,14 @@ self-roundtrip signals:
   quantiser. The decoder reads the indices back identically either way.
 - The §3.6.2 perceptual codebook-search weighting is implemented but
   off; the search runs on unweighted residuals.
-- The §4.6 enhancer constraint `b` is tuned to 0.005 (RFC suggests
-  0.05) to preserve the unenhanced excitation on the test signals.
+
+The §4.6 enhancer constraint `b` now uses the **normative** RFC 3951
+§4.6.4 spec value `0.05` (an earlier round had tuned it down to 0.005
+to game the self-referential synthetic-roundtrip SNR). Every
+reference-fixture PSNR floor passes at the spec value, so the spec value
+is authoritative; the `round_trip_snr.rs` synthetic floors were
+re-anchored (they measure our-encoder → our-decoder consistency, not
+reference conformance).
 
 ### Fidelity
 
