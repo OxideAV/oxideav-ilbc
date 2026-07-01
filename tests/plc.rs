@@ -17,9 +17,6 @@ use oxideav_core::{
     CodecId, CodecParameters, CodecRegistry, Decoder, Frame, Packet, SampleFormat, TimeBase,
 };
 
-const MAGIC_20: &[u8] = b"#!iLBC20\n";
-const MAGIC_30: &[u8] = b"#!iLBC30\n";
-
 fn fixture(name: &str) -> Option<Vec<u8>> {
     let p = PathBuf::from("../../docs/audio/ilbc/fixtures")
         .join(name)
@@ -27,17 +24,11 @@ fn fixture(name: &str) -> Option<Vec<u8>> {
     fs::read(p).ok()
 }
 
-/// Split a storage-format `.lbc` file into (frame_bytes, frames).
+/// Split a storage-format `.lbc` file into (frame_bytes, frames) via
+/// the public `oxideav_ilbc::storage` parser.
 fn split(input: &[u8]) -> (usize, Vec<Vec<u8>>) {
-    let (fb, body) = if input.starts_with(MAGIC_20) {
-        (38usize, &input[MAGIC_20.len()..])
-    } else if input.starts_with(MAGIC_30) {
-        (50usize, &input[MAGIC_30.len()..])
-    } else {
-        panic!("missing #!iLBC{{20,30}} magic");
-    };
-    assert_eq!(body.len() % fb, 0);
-    (fb, body.chunks_exact(fb).map(|c| c.to_vec()).collect())
+    let sf = oxideav_ilbc::storage::parse(input).expect("storage-format parse");
+    (sf.frame_size(), sf.frames().map(|f| f.to_vec()).collect())
 }
 
 fn make_dec() -> Box<dyn Decoder> {

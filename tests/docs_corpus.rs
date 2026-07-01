@@ -56,13 +56,6 @@ fn fixture_dir(name: &str) -> PathBuf {
 // `.lbc` / `.bin` carriage parsers
 // ---------------------------------------------------------------------------
 
-/// 9-byte storage-format magic: `#!iLBC20\n` (20 ms) or `#!iLBC30\n`
-/// (30 ms). De-facto container convention for raw iLBC frames on
-/// disk; the magic bytes are directly observable in any `.lbc` file
-/// in the wild. Not formally part of RFC 3951.
-const ILBC_MAGIC_20: &[u8] = b"#!iLBC20\n";
-const ILBC_MAGIC_30: &[u8] = b"#!iLBC30\n";
-
 /// Inferred carriage convention for an input file.
 #[derive(Clone, Copy, Debug)]
 enum Carriage {
@@ -83,23 +76,8 @@ enum Carriage {
 fn split_frames(input: &[u8], carriage: Carriage) -> (FrameMode, Vec<Vec<u8>>) {
     match carriage {
         Carriage::StorageFormat => {
-            let (mode, body) = if input.starts_with(ILBC_MAGIC_20) {
-                (FrameMode::Ms20, &input[ILBC_MAGIC_20.len()..])
-            } else if input.starts_with(ILBC_MAGIC_30) {
-                (FrameMode::Ms30, &input[ILBC_MAGIC_30.len()..])
-            } else {
-                panic!("storage-format input lacks #!iLBC{{20,30}}\\n magic");
-            };
-            let frame_size = mode.bytes();
-            assert_eq!(
-                body.len() % frame_size,
-                0,
-                "storage-format body length {} is not a multiple of {}",
-                body.len(),
-                frame_size
-            );
-            let frames = body.chunks_exact(frame_size).map(|c| c.to_vec()).collect();
-            (mode, frames)
+            let sf = oxideav_ilbc::storage::parse(input).expect("storage-format parse");
+            (sf.mode, sf.frames().map(|c| c.to_vec()).collect())
         }
         Carriage::Raw(mode) => {
             let frame_size = mode.bytes();

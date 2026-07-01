@@ -44,25 +44,11 @@ fn fixture_dir(name: &str) -> PathBuf {
     PathBuf::from("../../docs/audio/ilbc/fixtures").join(name)
 }
 
-/// 9-byte storage-format magic. De-facto on-disk convention for raw
-/// iLBC frames (not part of RFC 3951); the bytes are directly
-/// observable in any `.lbc` file.
-const ILBC_MAGIC_20: &[u8] = b"#!iLBC20\n";
-const ILBC_MAGIC_30: &[u8] = b"#!iLBC30\n";
-
-/// Slice a `#!iLBC{20,30}\n`-prefixed storage file into frame payloads.
+/// Slice a `#!iLBC{20,30}\n`-prefixed storage file into frame payloads
+/// via the public `oxideav_ilbc::storage` parser.
 fn split_storage_frames(input: &[u8]) -> (FrameMode, Vec<Vec<u8>>) {
-    let (mode, body) = if input.starts_with(ILBC_MAGIC_20) {
-        (FrameMode::Ms20, &input[ILBC_MAGIC_20.len()..])
-    } else if input.starts_with(ILBC_MAGIC_30) {
-        (FrameMode::Ms30, &input[ILBC_MAGIC_30.len()..])
-    } else {
-        panic!("storage-format input lacks #!iLBC{{20,30}}\\n magic");
-    };
-    let frame_size = mode.bytes();
-    assert_eq!(body.len() % frame_size, 0, "body not a multiple of frame");
-    let frames = body.chunks_exact(frame_size).map(|c| c.to_vec()).collect();
-    (mode, frames)
+    let sf = oxideav_ilbc::storage::parse(input).expect("storage-format parse");
+    (sf.mode, sf.frames().map(|f| f.to_vec()).collect())
 }
 
 /// Extract the `data` chunk PCM from a RIFF/WAVE file as int16 samples.

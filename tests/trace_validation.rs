@@ -246,31 +246,15 @@ fn parse_bracketed_body_u16(body: &str) -> Vec<u16> {
 // Per-fixture driver
 // ---------------------------------------------------------------------------
 
-const ILBC_MAGIC_20: &[u8] = b"#!iLBC20\n";
-const ILBC_MAGIC_30: &[u8] = b"#!iLBC30\n";
-
 fn fixture_dir(name: &str) -> PathBuf {
     PathBuf::from("../../docs/audio/ilbc/fixtures").join(name)
 }
 
 /// Slice a storage-format `.lbc` (with `#!iLBC{20,30}\n` magic) into
-/// per-frame payloads. The caller passes the expected mode for
-/// cross-checking against the magic.
+/// per-frame payloads via the public `oxideav_ilbc::storage` parser.
 fn split_storage_format(input: &[u8]) -> (FrameMode, Vec<Vec<u8>>) {
-    let (mode, body) = if input.starts_with(ILBC_MAGIC_20) {
-        (FrameMode::Ms20, &input[ILBC_MAGIC_20.len()..])
-    } else if input.starts_with(ILBC_MAGIC_30) {
-        (FrameMode::Ms30, &input[ILBC_MAGIC_30.len()..])
-    } else {
-        panic!("storage-format input lacks #!iLBC{{20,30}}\\n magic");
-    };
-    let fs = match mode {
-        FrameMode::Ms20 => FRAME_BYTES_20MS,
-        FrameMode::Ms30 => FRAME_BYTES_30MS,
-    };
-    assert_eq!(body.len() % fs, 0, "body length not multiple of frame size");
-    let frames = body.chunks_exact(fs).map(|c| c.to_vec()).collect();
-    (mode, frames)
+    let sf = oxideav_ilbc::storage::parse(input).expect("storage-format parse");
+    (sf.mode, sf.frames().map(|f| f.to_vec()).collect())
 }
 
 fn split_raw(input: &[u8], mode: FrameMode) -> Vec<Vec<u8>> {

@@ -38,11 +38,6 @@ use std::path::{Path, PathBuf};
 use oxideav_ilbc::bitreader::{parse_frame, FrameParams};
 use oxideav_ilbc::FrameMode;
 
-/// `#!iLBC20\n` / `#!iLBC30\n` storage-format magic (de-facto container
-/// convention; not part of RFC 3951 proper).
-const ILBC_MAGIC_20: &[u8] = b"#!iLBC20\n";
-const ILBC_MAGIC_30: &[u8] = b"#!iLBC30\n";
-
 fn fixture_dir(name: &str) -> PathBuf {
     PathBuf::from("../../docs/audio/ilbc/fixtures").join(name)
 }
@@ -173,11 +168,11 @@ fn read_input_for_trace(dir: &Path, trace: &str, expected: &[TraceFrame]) -> Vec
     let fname = header.trim_start_matches("# iLBC trace for ").trim();
     let bytes = fs::read(dir.join(fname)).expect("read input file named in trace");
 
-    // Strip the storage-format magic if present.
-    let body: &[u8] = if bytes.starts_with(ILBC_MAGIC_20) {
-        &bytes[ILBC_MAGIC_20.len()..]
-    } else if bytes.starts_with(ILBC_MAGIC_30) {
-        &bytes[ILBC_MAGIC_30.len()..]
+    // Strip the storage-format magic if present. The transition fixture
+    // mixes modes per-frame, so we walk the raw body ourselves rather
+    // than using storage::parse (which pins one mode per file).
+    let body: &[u8] = if oxideav_ilbc::storage::detect_mode(&bytes).is_some() {
+        &bytes[oxideav_ilbc::storage::MAGIC_LEN..]
     } else {
         &bytes
     };
@@ -399,16 +394,12 @@ fn trace_transition_mid_stream() {
         ("part_b_30ms.lbc", FrameMode::Ms30),
     ] {
         let bytes = fs::read(dir.join(fname)).expect("read transition half");
-        let body: &[u8] = if bytes.starts_with(ILBC_MAGIC_20) {
-            &bytes[ILBC_MAGIC_20.len()..]
-        } else if bytes.starts_with(ILBC_MAGIC_30) {
-            &bytes[ILBC_MAGIC_30.len()..]
-        } else {
-            &bytes
-        };
-        let sz = mode.bytes();
-        assert_eq!(body.len() % sz, 0, "{fname} body not {sz}-aligned");
-        for chunk in body.chunks_exact(sz) {
+        let sf = oxideav_ilbc::storage::parse(&bytes).expect("transition half parse");
+        assert_eq!(
+            sf.mode, mode,
+            "{fname} magic disagrees with documented mode"
+        );
+        for chunk in sf.frames() {
             payloads.push(chunk.to_vec());
         }
     }
