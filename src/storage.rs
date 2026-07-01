@@ -156,6 +156,50 @@ pub fn wrap_body(mode: FrameMode, body: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(out)
 }
 
+/// Bit-mask of the empty-frame indicator within the last payload byte.
+///
+/// RFC 3951 §3.8 packs the empty-frame indicator as the final (class-3)
+/// bit of the payload, which lands at the LSB of the last byte. When it
+/// is set the decoder MUST treat the frame as lost and run PLC. The RFC
+/// notes this bit "can be set to 1 to indicate lost frame for file
+/// storage format" — i.e. the storage form uses it as a per-frame
+/// packet-loss marker.
+pub const EMPTY_FRAME_INDICATOR_MASK: u8 = 0x01;
+
+/// Report whether a frame carries the empty-frame indicator (LSB of its
+/// last byte set), i.e. it is marked lost / to-be-concealed.
+///
+/// Returns `false` for an empty slice (no last byte to inspect).
+pub fn is_lost(frame: &[u8]) -> bool {
+    frame
+        .last()
+        .is_some_and(|&b| b & EMPTY_FRAME_INDICATOR_MASK != 0)
+}
+
+/// Return a copy of `frame` with the empty-frame indicator set, marking
+/// it as a lost frame for the file storage format (RFC 3951 §3.8). The
+/// decoder will conceal such a frame rather than trusting its payload,
+/// so the remaining payload bits are irrelevant — but they are preserved
+/// here so the operation is reversible with [`clear_lost`].
+pub fn mark_lost(frame: &[u8]) -> Vec<u8> {
+    let mut out = frame.to_vec();
+    if let Some(last) = out.last_mut() {
+        *last |= EMPTY_FRAME_INDICATOR_MASK;
+    }
+    out
+}
+
+/// Return a copy of `frame` with the empty-frame indicator cleared. Note
+/// that the RFC recommends the encoder set this bit to zero anyway, so
+/// on a well-formed non-lost frame this is a no-op.
+pub fn clear_lost(frame: &[u8]) -> Vec<u8> {
+    let mut out = frame.to_vec();
+    if let Some(last) = out.last_mut() {
+        *last &= !EMPTY_FRAME_INDICATOR_MASK;
+    }
+    out
+}
+
 /// Assert the two known frame sizes are exactly what the magic implies —
 /// a compile-time-ish sanity that the module and [`crate::FrameMode`]
 /// agree on sizing.
@@ -268,5 +312,42 @@ mod tests {
     fn magic_for_is_stable() {
         assert_eq!(magic_for(FrameMode::Ms20), MAGIC_20MS);
         assert_eq!(magic_for(FrameMode::Ms30), MAGIC_30MS);
+    }
+
+    #[test]
+    fn mark_and_detect_lost_frame() {
+        let frame = vec![0u8; 38];
+        assert!(!is_lost(&frame));
+        let lost = mark_lost(&frame);
+        assert!(is_lost(&lost));
+        // Only the indicator bit changed.
+        assert_eq!(lost.last(), Some(&0x01));
+        assert_eq!(&lost[..37], &frame[..37]);
+    }
+
+    #[test]
+    fn mark_lost_preserves_other_payload_bits() {
+        let frame: Vec<u8> = (0..50).map(|i| (0xF0 | (i & 0x0E)) as u8).collect();
+        let lost = mark_lost(&frame);
+        assert!(is_lost(&lost));
+        // Every byte but the last is untouched; the last differs only
+        // in bit 0.
+        assert_eq!(&lost[..49], &frame[..49]);
+        assert_eq!(lost[49], frame[49] | 0x01);
+    }
+
+    #[test]
+    fn clear_lost_is_inverse_of_mark_on_even_last_byte() {
+        let frame: Vec<u8> = (0..38).map(|i| (i * 2) as u8).collect(); // last byte even
+        assert!(!is_lost(&frame));
+        let lost = mark_lost(&frame);
+        let cleared = clear_lost(&lost);
+        assert!(!is_lost(&cleared));
+        assert_eq!(cleared, frame);
+    }
+
+    #[test]
+    fn is_lost_on_empty_slice_is_false() {
+        assert!(!is_lost(&[]));
     }
 }

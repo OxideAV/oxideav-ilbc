@@ -24,6 +24,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wrap/write round-trip that reproduces the original `.lbc` byte for
   byte).
 
+- Storage-format lost-frame markers: `storage::mark_lost` /
+  `storage::clear_lost` / `storage::is_lost` set, clear, and detect the
+  RFC 3951 §3.8 empty-frame indicator (LSB of the last payload byte),
+  which the RFC documents as the "lost frame" marker for the file
+  storage format. A marked frame routes to the decoder's residual-domain
+  PLC path. An integration test loses a mid-stream frame in a real
+  voice-like storage file and pins that the concealed frame still emits
+  a full block via `is_lost`-flagged concealment.
+
 - Residual-domain packet-loss concealment following the RFC 3951
   Appendix A.14 `doThePLC` example: a `conceal_residual` concealer that
   produces a concealed *excitation* (rather than concealing in the PCM

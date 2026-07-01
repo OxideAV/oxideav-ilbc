@@ -180,6 +180,10 @@ run of fixed-size (38- or 50-byte) frames.
   already-concatenated body) back into the storage form.
 - `storage::detect_mode` / `storage::magic_for` expose the magic ↔ mode
   mapping for probing.
+- `storage::mark_lost` / `storage::clear_lost` / `storage::is_lost` set,
+  clear, and detect the §3.8 empty-frame indicator — the RFC's "lost
+  frame" marker for the file storage format — which routes a frame to
+  the decoder's residual-domain PLC path.
 
 `tests/storage_format.rs` drives the parser against the real
 `containerless-vs-rtp-style-pair` (magic-stripped body is byte-identical

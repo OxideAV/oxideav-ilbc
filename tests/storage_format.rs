@@ -112,6 +112,33 @@ fn parsed_storage_file_drives_decoder() {
     assert_eq!(samples, 25 * 160);
 }
 
+/// A storage frame marked lost via `storage::mark_lost` drives the
+/// decoder's PLC path: the decoder still emits a full frame of samples
+/// (concealed, not garbage) and never errors, and the marked frame is
+/// detected as lost by `storage::is_lost` while its unmarked neighbours
+/// are not.
+#[test]
+fn lost_marked_storage_frame_conceals() {
+    let Some(lbc) = read_fixture("mode-20ms-voice-like", "input.lbc") else {
+        return;
+    };
+    let sf = storage::parse(&lbc).unwrap();
+    let clean: Vec<&[u8]> = sf.frames().collect();
+    assert!(clean.len() >= 6, "need a few frames to lose one mid-stream");
+
+    // Mark the 4th frame lost.
+    let mut owned: Vec<Vec<u8>> = clean.iter().map(|f| f.to_vec()).collect();
+    owned[3] = storage::mark_lost(&owned[3]);
+    assert!(storage::is_lost(&owned[3]));
+    assert!(!storage::is_lost(&owned[2]));
+    assert!(!storage::is_lost(&owned[4]));
+
+    let borrowed: Vec<&[u8]> = owned.iter().map(|f| f.as_slice()).collect();
+    let samples = decode_all(&borrowed);
+    // Every frame — including the concealed one — yields a full block.
+    assert_eq!(samples, owned.len() * sf.mode.samples());
+}
+
 /// The transition fixture ships a 20 ms half and a 30 ms half as two
 /// separate storage files; each parses to its own pinned mode.
 #[test]
