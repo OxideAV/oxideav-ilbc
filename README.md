@@ -190,6 +190,9 @@ run of fixed-size (38- or 50-byte) frames.
   clear, and detect the §3.8 empty-frame indicator — the RFC's "lost
   frame" marker for the file storage format — which routes a frame to
   the decoder's residual-domain PLC path.
+- `storage::decode` is the one-shot "read a file, get audio" helper:
+  parse a `.lbc` buffer and decode every frame (concealing lost-marked
+  frames) into interleaved mono S16 PCM.
 
 `tests/storage_format.rs` drives the parser against the real
 `containerless-vs-rtp-style-pair` (magic-stripped body is byte-identical

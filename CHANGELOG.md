@@ -33,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   voice-like storage file and pins that the concealed frame still emits
   a full block via `is_lost`-flagged concealment.
 
+- `storage::decode` — a one-shot "read a `.lbc` file, get PCM" helper
+  that parses the storage magic, drives every frame through the iLBC
+  decoder (concealing lost-marked frames), and returns interleaved mono
+  S16 samples. An integration test cross-checks it against the
+  hand-driven parse → decode loop on a real 30 ms voice-like fixture.
+
 - Residual-domain packet-loss concealment following the RFC 3951
   Appendix A.14 `doThePLC` example: a `conceal_residual` concealer that
   produces a concealed *excitation* (rather than concealing in the PCM

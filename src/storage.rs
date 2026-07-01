@@ -156,6 +156,48 @@ pub fn wrap_body(mode: FrameMode, body: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(out)
 }
 
+/// One-shot decode of a storage-format `.lbc` buffer to interleaved
+/// mono S16 PCM.
+///
+/// Parses the magic to recover the mode, then drives every frame through
+/// the iLBC decoder (respecting the §3.8 empty-frame indicator — a
+/// lost-marked frame is concealed, not decoded from garbage). Returns
+/// the concatenated 16-bit samples in decode order.
+///
+/// This is the "read a file, get audio" convenience; callers wanting
+/// per-frame control (timestamps, incremental output, mid-stream mode
+/// changes) should drive [`crate::decoder::make_decoder`] directly.
+///
+/// # Errors
+/// Propagates [`parse`] errors (bad magic / ragged body) and any decoder
+/// error.
+pub fn decode(buf: &[u8]) -> Result<Vec<i16>, Error> {
+    use oxideav_core::{CodecId, CodecParameters, Frame, Packet, SampleFormat, TimeBase};
+
+    let sf = parse(buf)?;
+
+    let mut params = CodecParameters::audio(CodecId::new(crate::CODEC_ID_STR));
+    params.sample_rate = Some(crate::SAMPLE_RATE);
+    params.channels = Some(1);
+    params.sample_format = Some(SampleFormat::S16);
+    let mut dec = crate::decoder::make_decoder(&params)?;
+
+    let tb = TimeBase::new(1, crate::SAMPLE_RATE as i64);
+    let mut pcm: Vec<i16> = Vec::with_capacity(sf.frame_count() * sf.mode.samples());
+    for (i, frame) in sf.frames().enumerate() {
+        let pkt = Packet::new(0, tb, frame.to_vec()).with_pts((i * sf.mode.samples()) as i64);
+        dec.send_packet(&pkt)?;
+        if let Frame::Audio(a) = dec.receive_frame()? {
+            for plane in &a.data {
+                for chunk in plane.chunks_exact(2) {
+                    pcm.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+                }
+            }
+        }
+    }
+    Ok(pcm)
+}
+
 /// Bit-mask of the empty-frame indicator within the last payload byte.
 ///
 /// RFC 3951 §3.8 packs the empty-frame indicator as the final (class-3)

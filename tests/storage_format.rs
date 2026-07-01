@@ -139,6 +139,33 @@ fn lost_marked_storage_frame_conceals() {
     assert_eq!(samples, owned.len() * sf.mode.samples());
 }
 
+/// The one-shot `storage::decode` helper produces the same PCM as the
+/// hand-driven parse → decode loop, and the expected sample count.
+#[test]
+fn storage_decode_matches_manual_loop() {
+    let Some(lbc) = read_fixture("mode-30ms-voice-like", "input.lbc") else {
+        return;
+    };
+    let sf = storage::parse(&lbc).unwrap();
+    let expected_samples = sf.frame_count() * sf.mode.samples();
+
+    let pcm = storage::decode(&lbc).expect("one-shot decode");
+    assert_eq!(pcm.len(), expected_samples);
+
+    // Cross-check against the hand-driven loop the manual API exposes.
+    let frames: Vec<&[u8]> = sf.frames().collect();
+    let manual_total = decode_all(&frames);
+    assert_eq!(manual_total, pcm.len());
+}
+
+/// `storage::decode` surfaces a parse error on a bad magic rather than
+/// panicking.
+#[test]
+fn storage_decode_rejects_bad_magic() {
+    let err = storage::decode(b"not an ilbc file").unwrap_err();
+    assert!(format!("{err}").contains("magic"));
+}
+
 /// The transition fixture ships a 20 ms half and a 30 ms half as two
 /// separate storage files; each parses to its own pinned mode.
 #[test]
