@@ -48,6 +48,7 @@ pub mod lsf_tables;
 pub mod rtp;
 pub mod state;
 pub mod state_encode;
+pub mod storage;
 pub mod synthesis;
 mod ulp;
 

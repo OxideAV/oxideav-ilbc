@@ -167,6 +167,25 @@ losses dampen per the `use_gain` ladder, a single loss recovers within a
 few frames without diverging, and losing the first frame (no saved
 residual) is bounded.
 
+## Storage format (RFC 3951 §5)
+
+The `storage` module reads and writes the de-facto `#!iLBC{20,30}\n`
+on-disk framing every `.lbc` file in the wild uses: a 9-byte ASCII
+magic header that pins the frame mode for the whole file, followed by a
+run of fixed-size (38- or 50-byte) frames.
+
+- `storage::parse` recovers the `FrameMode` from the magic and yields
+  the frame payloads, validating the body is a whole number of frames.
+- `storage::write` / `storage::wrap_body` serialise frames (or an
+  already-concatenated body) back into the storage form.
+- `storage::detect_mode` / `storage::magic_for` expose the magic ↔ mode
+  mapping for probing.
+
+`tests/storage_format.rs` drives the parser against the real
+`containerless-vs-rtp-style-pair` (magic-stripped body is byte-identical
+to the header-less carriage) and `transition-mid-stream` fixtures, and
+runs a parsed storage file through the decoder end to end.
+
 ## RTP payload format (RFC 3952)
 
 The `rtp` module is a pure depacketiser / packetiser — the 12-byte

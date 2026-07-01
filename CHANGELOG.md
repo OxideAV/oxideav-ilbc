@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Public `storage` module for the iLBC `#!iLBC{20,30}\n` on-disk
+  storage format (RFC 3951 §5 storage format, reference [1]). `parse`
+  recovers the pinned `FrameMode` from the 9-byte magic and yields the
+  fixed-size frame payloads (validating the body is a whole number of
+  frames); `write` / `wrap_body` serialise frames back to the storage
+  form; `detect_mode` / `magic_for` expose the magic mapping. This
+  consolidates the storage-format slicing that was previously
+  duplicated as a private helper across five test files. Eleven unit
+  tests plus a `tests/storage_format.rs` integration suite pin the
+  parser against the real `containerless-vs-rtp-style-pair` and
+  `transition-mid-stream` fixtures (magic-stripped body byte-identity,
+  three-carriage cross-check, storage-file → decoder handoff, and a
+  wrap/write round-trip that reproduces the original `.lbc` byte for
+  byte).
+
 - Residual-domain packet-loss concealment following the RFC 3951
   Appendix A.14 `doThePLC` example: a `conceal_residual` concealer that
   produces a concealed *excitation* (rather than concealing in the PCM
