@@ -1,5 +1,7 @@
 # oxideav-ilbc
 
+[![CI](https://github.com/OxideAV/oxideav-ilbc/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-ilbc/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-ilbc.svg)](https://crates.io/crates/oxideav-ilbc) [![docs.rs](https://docs.rs/oxideav-ilbc/badge.svg)](https://docs.rs/oxideav-ilbc) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Pure-Rust **iLBC** (Internet Low Bit Rate Codec, RFC 3951) narrowband
 speech codec — encoder, decoder, and the RFC 3952 RTP payload format.
 Zero C dependencies, no FFI, no `*-sys` crates.
