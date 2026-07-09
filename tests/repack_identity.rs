@@ -17,9 +17,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use oxideav_core::{
+    AudioFrame, CodecId, CodecOptions, CodecParameters, CodecRegistry, Encoder, Frame, SampleFormat,
+};
 use oxideav_ilbc::bitreader::{parse_frame, FrameParams};
 use oxideav_ilbc::bitwriter::{pack_frame, PackParams};
-use oxideav_ilbc::{storage, FrameMode};
+use oxideav_ilbc::{storage, FrameMode, CODEC_ID_STR, SAMPLE_RATE};
 
 fn fixtures_root() -> PathBuf {
     PathBuf::from("../../docs/audio/ilbc/fixtures")
@@ -119,6 +122,93 @@ fn repack_is_byte_identical_on_single_mode_fixtures() {
         return;
     }
     eprintln!("repack-ok: {total} frames across {dirs_seen} single-mode fixtures");
+}
+
+/// Encode `pcm` in `mode` and return the produced packet payloads.
+fn encode(mode: FrameMode, pcm: &[i16]) -> Vec<Vec<u8>> {
+    let mut reg = CodecRegistry::new();
+    oxideav_ilbc::register_codecs(&mut reg);
+    let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
+    params.sample_rate = Some(SAMPLE_RATE);
+    params.channels = Some(1);
+    params.sample_format = Some(SampleFormat::S16);
+    if mode == FrameMode::Ms30 {
+        params.options = CodecOptions::new().set("frame_ms", "30");
+    }
+    let mut enc: Box<dyn Encoder> = reg.first_encoder(&params).expect("encoder");
+
+    let mut bytes = Vec::with_capacity(pcm.len() * 2);
+    for &s in pcm {
+        bytes.extend_from_slice(&s.to_le_bytes());
+    }
+    enc.send_frame(&Frame::Audio(AudioFrame {
+        samples: pcm.len() as u32,
+        pts: Some(0),
+        data: vec![bytes],
+    }))
+    .unwrap();
+    enc.flush().unwrap();
+
+    let mut out = Vec::new();
+    while let Ok(pkt) = enc.receive_packet() {
+        out.push(pkt.data.clone());
+    }
+    out
+}
+
+/// The encoder must emit canonical §3.8 ULP: every produced packet is
+/// the mode's fixed size, carries a clear empty-frame indicator (a real
+/// encoded frame is never a lost marker), and survives a parse->repack
+/// cycle byte-for-bit. This closes the loop from the packer side —
+/// bitstream_trace.rs pins the unpacker, the fixture repack test pins
+/// the packer on captured data, and this pins the packer on freshly
+/// encoded data.
+#[test]
+fn encoder_output_is_canonical_and_repacks_identically() {
+    // Deterministic voiced-ish sweep so the encoder exercises non-trivial
+    // start-state / codebook / gain index choices (silence would coast on
+    // near-zero indices).
+    let voiced: Vec<i16> = (0..40 * 160)
+        .map(|n| {
+            let t = n as f32 / SAMPLE_RATE as f32;
+            let mut v = 0.0f32;
+            for h in 1..5 {
+                v +=
+                    (2.0 * std::f32::consts::PI * (110 * h) as f32 * t).sin() * (4000.0 / h as f32);
+            }
+            v.clamp(-32768.0, 32767.0) as i16
+        })
+        .collect();
+
+    for mode in [FrameMode::Ms20, FrameMode::Ms30] {
+        let sz = mode.bytes();
+        let packets = encode(mode, &voiced);
+        assert!(!packets.is_empty(), "{mode:?}: encoder produced no packets");
+        let mut checked = 0;
+        for (i, pkt) in packets.iter().enumerate() {
+            assert_eq!(
+                pkt.len(),
+                sz,
+                "{mode:?} packet #{i}: length {} != frame size {sz}",
+                pkt.len()
+            );
+            let fp =
+                parse_frame(pkt).unwrap_or_else(|e| panic!("{mode:?} packet #{i}: parse: {e:?}"));
+            assert_eq!(fp.mode, mode, "{mode:?} packet #{i}: mode");
+            assert!(
+                !fp.empty_flag,
+                "{mode:?} packet #{i}: encoder set the empty-frame indicator on a real frame"
+            );
+            let repacked = pack_frame(&pack_params_from(&fp))
+                .unwrap_or_else(|e| panic!("{mode:?} packet #{i}: pack: {e:?}"));
+            assert_eq!(
+                &repacked, pkt,
+                "{mode:?} packet #{i}: encoder output is not parse->pack stable"
+            );
+            checked += 1;
+        }
+        eprintln!("encoder-canonical-ok {mode:?}: {checked} packets");
+    }
 }
 
 #[test]
