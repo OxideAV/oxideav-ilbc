@@ -116,6 +116,13 @@ struct IlbcDecoder {
     /// Whether to apply the §4.8 output HP filter. Toggled by the
     /// `hp_filter=on` decoder parameter.
     hp_filter_on: bool,
+    /// Frame mode of the most recently decoded (or concealed) packet.
+    /// A zero-byte "lost" packet carries no length hint, so its
+    /// concealment must reuse the mode the stream has been running in
+    /// to keep the decoded sample count (and therefore the wall-clock
+    /// PTS advance) aligned — a 30 ms stream must conceal 240 samples,
+    /// not the 20 ms default. `None` until the first sized packet.
+    last_mode: Option<FrameMode>,
     pending: Option<Packet>,
     eof: bool,
 }
@@ -136,6 +143,7 @@ impl IlbcDecoder {
             old_a_per_sub: vec![identity; 6],
             hp_state: HpOutputState::default(),
             hp_filter_on,
+            last_mode: None,
             pending: None,
             eof: false,
         }
@@ -427,13 +435,19 @@ impl Decoder for IlbcDecoder {
             Some(m) => {
                 let mut out = vec![0.0f32; m.samples()];
                 self.decode_into(&pkt.data, &mut out)?;
+                self.last_mode = Some(m);
                 (m, out)
             }
             None if pkt.data.is_empty() => {
-                // Zero-byte packet: treat as a 20 ms concealment frame.
-                let m = FrameMode::Ms20;
+                // Zero-byte packet: a lost frame carrying no length hint.
+                // Conceal in the mode the stream has been running in so
+                // the sample count / PTS advance stays aligned (a 30 ms
+                // stream must emit 240 samples). Fall back to 20 ms only
+                // when no sized packet has been seen yet.
+                let m = self.last_mode.unwrap_or(FrameMode::Ms20);
                 let mut out = vec![0.0f32; m.samples()];
                 self.conceal_into(m, &mut out);
+                self.last_mode = Some(m);
                 (m, out)
             }
             None => {
@@ -482,6 +496,7 @@ impl Decoder for IlbcDecoder {
         id[0] = 1.0;
         self.old_a_per_sub = vec![id; 6];
         self.hp_state.reset();
+        self.last_mode = None;
         self.pending = None;
         self.eof = false;
         Ok(())
@@ -566,6 +581,43 @@ mod tests {
         let pkt = Packet::new(0, TimeBase::new(1, SAMPLE_RATE as i64), vec![0u8; 7]);
         dec.send_packet(&pkt).unwrap();
         assert!(dec.receive_frame().is_err());
+    }
+
+    fn decode_len(dec: &mut Box<dyn Decoder>, data: Vec<u8>) -> u32 {
+        let pkt = Packet::new(0, TimeBase::new(1, SAMPLE_RATE as i64), data);
+        dec.send_packet(&pkt).unwrap();
+        let Frame::Audio(a) = dec.receive_frame().unwrap() else {
+            panic!("expected audio frame");
+        };
+        a.samples
+    }
+
+    /// A zero-byte "lost" packet carries no length hint. Before any sized
+    /// packet it falls back to the 20 ms default, but once the stream has
+    /// established a mode the concealment must follow it so the sample
+    /// count (and PTS advance) stays aligned.
+    #[test]
+    fn zero_byte_loss_conceals_in_established_mode() {
+        // Fresh decoder, first packet lost: 20 ms fallback.
+        let mut dec = make_dec();
+        assert_eq!(decode_len(&mut dec, Vec::new()), 160);
+
+        // 30 ms stream: a subsequent zero-byte loss must conceal 240
+        // samples, not the 20 ms default.
+        let mut dec = make_dec();
+        assert_eq!(decode_len(&mut dec, vec![0u8; FRAME_BYTES_30MS]), 240);
+        assert_eq!(decode_len(&mut dec, Vec::new()), 240);
+        // A following good 30 ms frame still decodes normally.
+        assert_eq!(decode_len(&mut dec, vec![0u8; FRAME_BYTES_30MS]), 240);
+
+        // 20 ms stream: a zero-byte loss stays at 160.
+        let mut dec = make_dec();
+        assert_eq!(decode_len(&mut dec, vec![0u8; FRAME_BYTES_20MS]), 160);
+        assert_eq!(decode_len(&mut dec, Vec::new()), 160);
+
+        // reset() clears the established mode -> back to 20 ms fallback.
+        dec.reset().unwrap();
+        assert_eq!(decode_len(&mut dec, Vec::new()), 160);
     }
 
     #[test]
