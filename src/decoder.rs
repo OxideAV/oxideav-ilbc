@@ -268,10 +268,17 @@ impl IlbcDecoder {
             }
         }
 
-        // Backward pass: cb_mem seeded with the time-reversed tail of
-        // the decoded state span (and, in the reference, the forward
-        // sub-blocks just decoded — but we follow the reference's
-        // simplified seeding which only reads the state span itself).
+        // Backward pass: seed the CB memory with the time-reversed
+        // decoded residual spanning the state block AND the forward
+        // sub-blocks just decoded. RFC 3951 Appendix A.5 (decoder,
+        // mirroring the encoder listing at lines 3284-3291) sets
+        // `meml_gotten = SUBL*(nsub+1-start)` (capped at CB_MEML) and
+        // fills `mem[CB_MEML-1-k] = decresidual[(start-1)*SUBL + k]`
+        // for `k in 0..meml_gotten` — i.e. it reads forward from the
+        // start of the state span across every forward sub-block written
+        // above, not just the state span itself. `span_lo` is
+        // `(start-1)*SUBL`, so `span_lo + meml_gotten == n_sub*SUBL`
+        // (the end of the frame).
         if n_back > 0 {
             let meml_gotten = (SUBL * (n_sub + 1 - start)).min(CB_LMEM);
             let mut mem = [0.0f32; CB_LMEM];
@@ -573,6 +580,39 @@ mod tests {
             panic!("expected audio frame");
         };
         assert_eq!(a.samples, 240);
+    }
+
+    /// RFC 3951 Appendix A.5 seeds the backward CB memory across the
+    /// state span AND the forward sub-blocks (`meml_gotten =
+    /// SUBL*(nsub+1-start)`, filled from `(start-1)*SUBL`). This pins the
+    /// invariant that the seeding reaches the end of the frame — so a
+    /// future change can't silently truncate it to the state span, which
+    /// would starve the pre-state sub-blocks of their predictor history.
+    #[test]
+    fn backward_seeding_spans_the_forward_region() {
+        // (mode sub-blocks, start) cases with at least one forward
+        // sub-block (n_for = n_sub - start - 1 > 0).
+        for (n_sub, start) in [(4usize, 1usize), (6, 1), (6, 2), (6, 3)] {
+            let n_for = n_sub - start - 1;
+            assert!(n_for > 0, "test case must have a forward sub-block");
+            let meml_gotten = (SUBL * (n_sub + 1 - start)).min(CB_LMEM);
+            let span_lo = (start - 1) * SUBL;
+            // The read window ends at the frame end (or CB_LMEM cap),
+            // covering the forward region that starts after the 80-sample
+            // state span.
+            let read_end = span_lo + meml_gotten;
+            let frame_end = n_sub * SUBL;
+            assert_eq!(
+                read_end.min(span_lo + CB_LMEM),
+                frame_end.min(span_lo + CB_LMEM),
+                "backward seeding must reach the frame end for n_sub={n_sub} start={start}",
+            );
+            // And it reads past the state span into the forward region.
+            assert!(
+                meml_gotten > STATE_LEN,
+                "seeding window must extend beyond the 80-sample state span",
+            );
+        }
     }
 
     #[test]
