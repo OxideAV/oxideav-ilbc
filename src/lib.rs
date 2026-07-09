@@ -1,7 +1,9 @@
 //! Pure-Rust iLBC (Internet Low Bit Rate Codec) decoder — RFC 3951.
 //!
 //! iLBC is an 8 kHz narrowband speech codec designed for VoIP over
-//! lossy channels. This crate implements the decoder side only.
+//! lossy channels. This crate implements both the decoder and the
+//! encoder, plus the RFC 3952 RTP payload format and the `#!iLBC{20,30}`
+//! storage container.
 //!
 //! Pipeline (all pure-Rust, RFC 3951 §4):
 //! - [`bitreader`]: 304-/400-bit payload -> split-VQ LSF indices + start-

@@ -1,8 +1,9 @@
 //! iLBC codec registration.
 //!
-//! iLBC is a decode-only codec in this crate. Frame size is inferred
-//! from packet length (38 -> 20 ms / 160 samples, 50 -> 30 ms / 240
-//! samples). Both modes produce 8 kHz mono `S16` audio.
+//! Registers both a decoder and an encoder for the `"ilbc"` codec id.
+//! On decode, frame size is inferred from packet length (38 -> 20 ms /
+//! 160 samples, 50 -> 30 ms / 240 samples); both modes produce 8 kHz
+//! mono `S16` audio.
 
 use oxideav_core::{CodecCapabilities, CodecId, CodecParameters, Result};
 use oxideav_core::{CodecInfo, CodecRegistry, Decoder, Encoder};

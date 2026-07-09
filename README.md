@@ -13,9 +13,8 @@ framework but usable standalone.
 
 ```toml
 [dependencies]
-oxideav-core  = "0.1"
-oxideav-codec = "0.1"
-oxideav-ilbc  = "0.0"
+oxideav-core = "0.1"
+oxideav-ilbc = "0.0"
 ```
 
 ## Format
@@ -33,18 +32,17 @@ concealment (PLC).
 ## Quick use
 
 ```rust
-use oxideav_codec::CodecRegistry;
-use oxideav_core::{CodecId, CodecParameters, SampleFormat};
+use oxideav_core::{CodecId, CodecParameters, RuntimeContext, SampleFormat};
 
-let mut codecs = CodecRegistry::new();
-oxideav_ilbc::register(&mut codecs);
+let mut ctx = RuntimeContext::new();
+oxideav_ilbc::register(&mut ctx);
 
 let mut params = CodecParameters::audio(CodecId::new("ilbc"));
 params.sample_rate = Some(8_000);
 params.channels = Some(1);
 params.sample_format = Some(SampleFormat::S16);
 
-let mut dec = codecs.make_decoder(&params)?;
+let mut dec = ctx.codecs.make_decoder(&params)?;
 # Ok::<(), oxideav_core::Error>(())
 ```
 
