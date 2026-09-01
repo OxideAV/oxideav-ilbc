@@ -35,20 +35,27 @@
 //! - 50 bytes  -> 30 ms / 240 samples / 400 bits
 
 pub mod bitreader;
+#[doc(hidden)]
 pub mod bitwriter;
 pub mod cb;
+#[doc(hidden)]
 pub mod cb_search;
 pub mod codec;
 pub mod decoder;
 pub mod encoder;
+#[doc(hidden)]
 pub mod enhancer;
 pub mod hp_filter;
+#[doc(hidden)]
 pub mod lpc_analysis;
 pub mod lsf;
+#[doc(hidden)]
 pub mod lsf_quant;
+#[doc(hidden)]
 pub mod lsf_tables;
 pub mod rtp;
 pub mod state;
+#[doc(hidden)]
 pub mod state_encode;
 pub mod storage;
 pub mod synthesis;
