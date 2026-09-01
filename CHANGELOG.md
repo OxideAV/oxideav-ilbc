@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.8](https://github.com/OxideAV/oxideav-ilbc/compare/v0.0.7...v0.0.8) - 2026-09-01
+
+### Other
+
+- hide internal pub surface from rustdoc/semver (fleet rule 2026-09-01)
+- ilbc r403: pin encoder emits canonical ULP (length, clear empty flag, repack-stable)
+- ilbc r403: pin ULP pack==unpack byte-identity on real fixture frames
+- ilbc r403: correct backward-CB-seeding comment; pin the span invariant
+- ilbc r403: fix README quick-use + drop stale decode-only module docs
+- ilbc r403: conceal zero-byte loss packets in the established frame mode
+- add CI / crates.io / docs.rs / MIT-license badges
+- ilbc r382: storage::decode one-shot .lbc buffer -> PCM helper
+- ilbc r382: restore §4.6.4 enhancer constraint to normative spec value b=0.05
+- ilbc r382: storage-format lost-frame markers (§3.8 empty-frame indicator)
+- ilbc r382: route the five test-file storage-slicers through storage::parse
+- ilbc r382: public storage module for the #!iLBC{20,30} storage format
+- ilbc r353: README — document residual-domain §A.14 PLC + tests/plc.rs
+- ilbc r353: wire decoder to residual-domain PLC (§A.14 / §A.44)
+- ilbc r353: residual-domain PLC core per RFC 3951 §A.14 doThePLC
+- cite RFC 3951 §A.2 instead of 'the reference' in output-stage prose (r346 Hat-2)
+- ilbc r346: README fidelity — §A.2 truncating output conversion, near-bit-exact silence
+- ilbc r346: pin encoder forward-path determinism + frame-size invariants
+- ilbc r346: match §A.2 clamp-then-truncate decoder output conversion
+- ilbc r335: §4.5.2 pitch-synchronous packet-loss concealment
+- neutralize black-box-validator naming in decoder_wellformed test doc
+- ilbc r317: skip decoder_wellformed when fixture corpus absent (CI fix)
+- ilbc r317: pin decoder well-formedness on tonal fixtures; localise corpus PSNR anomaly to reference WAVs
+- refresh to current status, drop per-round changelog cruft
+
 ### Added
 
 - Public `storage` module for the iLBC `#!iLBC{20,30}\n` on-disk
