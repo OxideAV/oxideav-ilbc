@@ -42,7 +42,7 @@ params.sample_rate = Some(8_000);
 params.channels = Some(1);
 params.sample_format = Some(SampleFormat::S16);
 
-let mut dec = ctx.codecs.make_decoder(&params)?;
+let mut dec = ctx.codecs.first_decoder(&params)?;
 # Ok::<(), oxideav_core::Error>(())
 ```
 
