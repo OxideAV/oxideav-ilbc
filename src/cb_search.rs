@@ -31,8 +31,8 @@
 //!   - total = 128, stages 0/1/2 all 7 bits.
 
 use crate::cb::{
-    extract_cbvec_into_filtered, extract_cbvec_veclen, filter_cb_memory, update_cb_memory,
-    GAIN_SQ3_TBL, GAIN_SQ4_TBL, GAIN_SQ5_TBL,
+    GAIN_SQ3_TBL, GAIN_SQ4_TBL, GAIN_SQ5_TBL, extract_cbvec_into_filtered, extract_cbvec_veclen,
+    filter_cb_memory, update_cb_memory,
 };
 use crate::{CB_LMEM, LPC_ORDER, SUBL};
 

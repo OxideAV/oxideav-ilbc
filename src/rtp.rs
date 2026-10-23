@@ -49,7 +49,7 @@
 
 use oxideav_core::{Error, Result};
 
-use crate::{FrameMode, FRAME_BYTES_20MS, FRAME_BYTES_30MS};
+use crate::{FRAME_BYTES_20MS, FRAME_BYTES_30MS, FrameMode};
 
 /// Default RTP clock rate for iLBC: 8 kHz, matching the codec's
 /// narrowband sample rate (RFC 3951 §1 / §3.8). The RTP timestamp
@@ -115,7 +115,7 @@ impl Depacketiser {
     /// the per-frame byte count.
     pub fn frame_count(&self, payload_len: usize) -> Option<usize> {
         let fs = self.frame_size();
-        if payload_len == 0 || payload_len % fs != 0 {
+        if payload_len == 0 || !payload_len.is_multiple_of(fs) {
             None
         } else {
             Some(payload_len / fs)
@@ -138,7 +138,7 @@ impl Depacketiser {
                 "iLBC RTP depacketiser: empty payload (RFC 3952 §3 requires ≥1 frame)",
             ));
         }
-        if payload.len() % fs != 0 {
+        if !payload.len().is_multiple_of(fs) {
             return Err(Error::invalid(
                 "iLBC RTP depacketiser: payload length is not a multiple of the mode's frame size",
             ));
@@ -458,8 +458,8 @@ pub fn detect_mode_from_payload_len(payload_len: usize) -> Option<FrameMode> {
     if payload_len == 0 {
         return None;
     }
-    let by_20 = payload_len % FRAME_BYTES_20MS == 0;
-    let by_30 = payload_len % FRAME_BYTES_30MS == 0;
+    let by_20 = payload_len.is_multiple_of(FRAME_BYTES_20MS);
+    let by_30 = payload_len.is_multiple_of(FRAME_BYTES_30MS);
     match (by_20, by_30) {
         (true, false) => Some(FrameMode::Ms20),
         (false, true) => Some(FrameMode::Ms30),
@@ -601,11 +601,11 @@ fn parse_named_u32(fmtp_value: &str, key: &str) -> Option<u32> {
 /// back to the same [`FrameMode`] without any whitespace shaping.
 pub fn build_fmtp(mode: FrameMode, max_frames_per_packet: Option<usize>) -> String {
     let mut out = format_mode_fmtp(mode);
-    if let Some(n) = max_frames_per_packet {
-        if n > 1 {
-            let cap_ms = (n as u32).saturating_mul(frame_duration_ms(mode));
-            out.push_str(&format!(";maxptime={cap_ms}"));
-        }
+    if let Some(n) = max_frames_per_packet
+        && n > 1
+    {
+        let cap_ms = (n as u32).saturating_mul(frame_duration_ms(mode));
+        out.push_str(&format!(";maxptime={cap_ms}"));
     }
     out
 }
@@ -654,16 +654,16 @@ pub fn build_fmtp_with_ptime(
     let maxptime_ms =
         maxptime_frames.and_then(|m| (m > 1).then(|| (m as u32).saturating_mul(frame_ms)));
 
-    if let Some(p) = ptime_frames {
-        if p >= 1 {
-            let mut ptime_ms = (p as u32).saturating_mul(frame_ms);
-            // RFC 4566 §6: the typical packetisation time must not
-            // exceed the advertised maximum.
-            if let Some(cap_ms) = maxptime_ms {
-                ptime_ms = ptime_ms.min(cap_ms);
-            }
-            out.push_str(&format!(";ptime={ptime_ms}"));
+    if let Some(p) = ptime_frames
+        && p >= 1
+    {
+        let mut ptime_ms = (p as u32).saturating_mul(frame_ms);
+        // RFC 4566 §6: the typical packetisation time must not
+        // exceed the advertised maximum.
+        if let Some(cap_ms) = maxptime_ms {
+            ptime_ms = ptime_ms.min(cap_ms);
         }
+        out.push_str(&format!(";ptime={ptime_ms}"));
     }
 
     if let Some(cap_ms) = maxptime_ms {
@@ -727,7 +727,7 @@ mod tests {
     #[test]
     fn detect_mode_picks_20ms_for_pure_38_multiples() {
         for k in 1..=8 {
-            let want = if (k * FRAME_BYTES_20MS) % FRAME_BYTES_30MS == 0 {
+            let want = if (k * FRAME_BYTES_20MS).is_multiple_of(FRAME_BYTES_30MS) {
                 None
             } else {
                 Some(FrameMode::Ms20)
@@ -743,7 +743,7 @@ mod tests {
     #[test]
     fn detect_mode_picks_30ms_for_pure_50_multiples() {
         for k in 1..=8 {
-            let want = if (k * FRAME_BYTES_30MS) % FRAME_BYTES_20MS == 0 {
+            let want = if (k * FRAME_BYTES_30MS).is_multiple_of(FRAME_BYTES_20MS) {
                 None
             } else {
                 Some(FrameMode::Ms30)

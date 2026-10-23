@@ -35,8 +35,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use oxideav_ilbc::bitreader::{parse_frame, FrameParams};
 use oxideav_ilbc::FrameMode;
+use oxideav_ilbc::bitreader::{FrameParams, parse_frame};
 
 fn fixture_dir(name: &str) -> PathBuf {
     PathBuf::from("../../docs/audio/ilbc/fixtures").join(name)
@@ -65,10 +65,10 @@ struct TraceFrame {
 /// Parse a `key=val` token list out of a trace line tail.
 fn kv<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     for tok in line.split_whitespace() {
-        if let Some(rest) = tok.strip_prefix(key) {
-            if let Some(v) = rest.strip_prefix('=') {
-                return Some(v);
-            }
+        if let Some(rest) = tok.strip_prefix(key)
+            && let Some(v) = rest.strip_prefix('=')
+        {
+            return Some(v);
         }
     }
     None

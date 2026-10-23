@@ -63,10 +63,10 @@
 //! Run with:
 //!     cargo bench -p oxideav-ilbc --bench rtp
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use oxideav_ilbc::rtp::{Depacketiser, Packetiser};
-use oxideav_ilbc::{FrameMode, FRAME_BYTES_20MS, FRAME_BYTES_30MS};
+use oxideav_ilbc::{FRAME_BYTES_20MS, FRAME_BYTES_30MS, FrameMode};
 
 /// Deterministic xorshift32 — shared with the sibling bench files
 /// so every scenario draws from the same input distribution.

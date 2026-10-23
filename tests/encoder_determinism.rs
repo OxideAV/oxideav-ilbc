@@ -14,7 +14,7 @@ use oxideav_core::{
 };
 use oxideav_core::{CodecRegistry, Packet, TimeBase};
 
-use oxideav_ilbc::{FrameMode, CODEC_ID_STR, FRAME_BYTES_20MS, FRAME_BYTES_30MS, SAMPLE_RATE};
+use oxideav_ilbc::{CODEC_ID_STR, FRAME_BYTES_20MS, FRAME_BYTES_30MS, FrameMode, SAMPLE_RATE};
 
 fn gen_voiced(samples: usize) -> Vec<i16> {
     let f0 = 130.0f32;
@@ -141,7 +141,7 @@ fn reencode_of_decoded_output_is_deterministic_20ms() {
         let dp = Packet::new(0, TimeBase::new(1, SAMPLE_RATE as i64), p.clone());
         dec.send_packet(&dp).unwrap();
         if let Frame::Audio(a) = dec.receive_frame().unwrap() {
-            for c in a.data[0].chunks_exact(2) {
+            for c in a.data[0].as_chunks::<2>().0 {
                 decoded.push(i16::from_le_bytes([c[0], c[1]]));
             }
         }

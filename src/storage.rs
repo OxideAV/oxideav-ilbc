@@ -26,7 +26,7 @@
 //! assert_eq!(parsed.frames().count(), 2);
 //! ```
 
-use crate::{FrameMode, FRAME_BYTES_20MS, FRAME_BYTES_30MS};
+use crate::{FRAME_BYTES_20MS, FRAME_BYTES_30MS, FrameMode};
 use oxideav_core::Error;
 
 /// 9-byte storage-format magic for 20 ms mode.
@@ -106,7 +106,7 @@ pub fn parse(buf: &[u8]) -> Result<StorageFile<'_>, Error> {
     })?;
     let body = &buf[MAGIC_LEN..];
     let frame_size = mode.bytes();
-    if body.len() % frame_size != 0 {
+    if !body.len().is_multiple_of(frame_size) {
         return Err(Error::invalid(format!(
             "iLBC storage: {mode:?} body length {} is not a multiple of frame size {frame_size}",
             body.len()
@@ -144,7 +144,7 @@ pub fn write(mode: FrameMode, frames: &[&[u8]]) -> Result<Vec<u8>, Error> {
 /// Returns an error if `body` is not a whole number of frames.
 pub fn wrap_body(mode: FrameMode, body: &[u8]) -> Result<Vec<u8>, Error> {
     let frame_size = mode.bytes();
-    if body.len() % frame_size != 0 {
+    if !body.len().is_multiple_of(frame_size) {
         return Err(Error::invalid(format!(
             "iLBC storage: body length {} is not a multiple of frame size {frame_size} for {mode:?}",
             body.len()
@@ -189,7 +189,7 @@ pub fn decode(buf: &[u8]) -> Result<Vec<i16>, Error> {
         dec.send_packet(&pkt)?;
         if let Frame::Audio(a) = dec.receive_frame()? {
             for plane in &a.data {
-                for chunk in plane.chunks_exact(2) {
+                for chunk in plane.as_chunks::<2>().0 {
                     pcm.push(i16::from_le_bytes([chunk[0], chunk[1]]));
                 }
             }
@@ -317,7 +317,12 @@ mod tests {
     #[test]
     fn write_then_parse_roundtrips() {
         let raw = body(FrameMode::Ms30, 5);
-        let frames: Vec<&[u8]> = raw.chunks_exact(50).collect();
+        let frames: Vec<&[u8]> = raw
+            .as_chunks::<50>()
+            .0
+            .iter()
+            .map(|f| f.as_slice())
+            .collect();
         let file = write(FrameMode::Ms30, &frames).unwrap();
         assert_eq!(&file[..MAGIC_LEN], MAGIC_30MS);
         let sf = parse(&file).unwrap();

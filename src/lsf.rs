@@ -10,7 +10,7 @@
 //! state for the first sub-block of the next frame; on the very first
 //! frame this is initialised to `LSF_MEAN`.
 
-use crate::lsf_tables::{assemble_lsf, LSF_MEAN, LSF_MIN_GAP};
+use crate::lsf_tables::{LSF_MEAN, LSF_MIN_GAP, assemble_lsf};
 use crate::{FrameMode, LPC_ORDER};
 
 /// LSF decoder state — holds the last frame's (quantised) LSF vector

@@ -30,8 +30,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-use oxideav_ilbc::bitreader::{parse_frame, FrameParams};
-use oxideav_ilbc::{FrameMode, FRAME_BYTES_20MS, FRAME_BYTES_30MS};
+use oxideav_ilbc::bitreader::{FrameParams, parse_frame};
+use oxideav_ilbc::{FRAME_BYTES_20MS, FRAME_BYTES_30MS, FrameMode};
 
 // ---------------------------------------------------------------------------
 // Trace records
@@ -123,11 +123,11 @@ fn parse_trace_streams(text: &str) -> Vec<Vec<FrameExpect>> {
             // `[ a  b  c]` or `[ a  b  c   d  e  f]`.
             let nums = parse_bracketed_u16_list(rest);
             assert!(
-                nums.len() % 3 == 0 && !nums.is_empty(),
+                nums.len().is_multiple_of(3) && !nums.is_empty(),
                 "LSF_DECODE split_vq length not a positive multiple of 3"
             );
             let mut rows = Vec::with_capacity(nums.len() / 3);
-            for chunk in nums.chunks_exact(3) {
+            for chunk in nums.as_chunks::<3>().0 {
                 rows.push([chunk[0], chunk[1], chunk[2]]);
             }
             if let Some(fe) = cur.as_mut() {

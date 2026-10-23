@@ -6,8 +6,8 @@
 //! Enhancer SNR diagnostic — a noisy pitched excitation should be
 //! smoothed toward the noiseless reference by the §4.6 enhancer.
 
-use oxideav_ilbc::enhancer::{enhance_frame, EnhancerState, ENH_BUFL};
 use oxideav_ilbc::FrameMode;
+use oxideav_ilbc::enhancer::{ENH_BUFL, EnhancerState, enhance_frame};
 
 fn snr_db(reference: &[f32], test: &[f32]) -> f32 {
     assert_eq!(reference.len(), test.len());

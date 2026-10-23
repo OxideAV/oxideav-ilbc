@@ -29,13 +29,13 @@
 //! Run with:
 //!     cargo bench -p oxideav-ilbc --bench decode
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use oxideav_core::{
     AudioFrame, CodecId, CodecOptions, CodecParameters, Encoder, Error, Frame, Packet,
     SampleFormat, TimeBase,
 };
-use oxideav_ilbc::{decoder, encoder, FrameMode, CODEC_ID_STR, SAMPLE_RATE};
+use oxideav_ilbc::{CODEC_ID_STR, FrameMode, SAMPLE_RATE, decoder, encoder};
 
 /// Deterministic xorshift32 — shared with the sibling bench files so
 /// every scenario draws from the same input distribution.

@@ -6,10 +6,10 @@
 //! three indices (6, 7, 7 bits) and the corresponding quantised LSF
 //! vector.
 
-use crate::lsf_tables::{
-    lookup_split, LSF_CB_TBL_1, LSF_CB_TBL_2, LSF_CB_TBL_3, SPLIT_DIMS, SPLIT_OFFSETS, SPLIT_SIZES,
-};
 use crate::LPC_ORDER;
+use crate::lsf_tables::{
+    LSF_CB_TBL_1, LSF_CB_TBL_2, LSF_CB_TBL_3, SPLIT_DIMS, SPLIT_OFFSETS, SPLIT_SIZES, lookup_split,
+};
 
 /// Squared-error nearest-neighbour search for one split.
 fn nearest(split: usize, target: &[f32]) -> u16 {

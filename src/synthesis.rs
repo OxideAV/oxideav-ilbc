@@ -685,7 +685,7 @@ mod tests {
         }
         state.plc_pitch = lag;
         state.plc_voicing = 1.0; // fully voiced → no random component
-                                 // identity LP filter so output == excitation.
+        // identity LP filter so output == excitation.
         let mut id = [0.0f32; LPC_ORDER + 1];
         id[0] = 1.0;
         state.last_a = id;

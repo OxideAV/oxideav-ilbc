@@ -43,7 +43,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use oxideav_core::{CodecId, CodecParameters, Frame, Packet, SampleFormat, TimeBase};
-use oxideav_ilbc::{FrameMode, CODEC_ID_STR, FRAME_BYTES_20MS, FRAME_BYTES_30MS, SAMPLE_RATE};
+use oxideav_ilbc::{CODEC_ID_STR, FRAME_BYTES_20MS, FRAME_BYTES_30MS, FrameMode, SAMPLE_RATE};
 
 /// Locate `docs/audio/ilbc/fixtures/<name>/`. Tests run with CWD set
 /// to the crate root, so we walk two levels up to reach the workspace
@@ -227,7 +227,7 @@ fn decode_pcm(packets: &[Vec<u8>]) -> Result<Vec<i16>, String> {
         match dec.receive_frame() {
             Ok(Frame::Audio(a)) => {
                 assert_eq!(a.data.len(), 1, "iLBC produces one interleaved plane");
-                for chunk in a.data[0].chunks_exact(2) {
+                for chunk in a.data[0].as_chunks::<2>().0 {
                     pcm.push(i16::from_le_bytes([chunk[0], chunk[1]]));
                 }
             }
@@ -330,7 +330,9 @@ fn evaluate(case: &CorpusCase) {
     assert_eq!(ch, 1, "{}: wav channels {} != 1", case.name, ch);
     assert_eq!(bps, 16, "{}: wav bps {} != 16", case.name, bps);
     let reference: Vec<i16> = pcm_bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect();
 
@@ -633,7 +635,9 @@ fn silence_exact_fraction(name: &str) -> f64 {
     let ours = decode_pcm(&frames).expect("decode silence fixture");
     let (_, _, _, pcm_bytes) = parse_wav(&wav);
     let reference: Vec<i16> = pcm_bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect();
     let s = score(&ours, &reference);
@@ -718,7 +722,9 @@ fn corpus_transition_concatenated_raw_with_known_splice() {
     let (sr, ch, bps, pcm_bytes) = parse_wav(&wav);
     assert_eq!((sr, ch, bps), (SAMPLE_RATE, 1, 16));
     let reference: Vec<i16> = pcm_bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect();
 

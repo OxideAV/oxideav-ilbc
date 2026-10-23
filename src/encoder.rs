@@ -46,15 +46,15 @@ use oxideav_core::{
 };
 
 use crate::bitreader::CbStageIndices;
-use crate::bitwriter::{pack_frame, PackParams};
+use crate::bitwriter::{PackParams, pack_frame};
 use crate::cb::update_cb_memory;
 use crate::cb_search::{search_cb_abs, search_cb_capped_with_gain_correction};
-use crate::hp_filter::{hp_input, HpInputState};
-use crate::lpc_analysis::{asymmetric_window, block_lpc, hanning_window, lpc_to_lsf, LPC_WINLEN};
-use crate::lsf::{decode_and_interpolate, dequant_lsf, LsfState};
+use crate::hp_filter::{HpInputState, hp_input};
+use crate::lpc_analysis::{LPC_WINLEN, asymmetric_window, block_lpc, hanning_window, lpc_to_lsf};
+use crate::lsf::{LsfState, decode_and_interpolate, dequant_lsf};
 use crate::lsf_quant::quantise_lsf;
 use crate::state_encode::lpc_analysis_filter;
-use crate::{FrameMode, CB_LMEM, CODEC_ID_STR, LPC_ORDER, SAMPLE_RATE, STATE_LEN, SUBL};
+use crate::{CB_LMEM, CODEC_ID_STR, FrameMode, LPC_ORDER, SAMPLE_RATE, STATE_LEN, SUBL};
 
 /// RFC 3951 §3.5.1 / Appendix A.20 `FrameClassify`.
 ///
@@ -799,7 +799,7 @@ impl Encoder for IlbcEncoder {
         // application's input characteristics).
         let n = bytes.len() / 2;
         let mut raw = Vec::with_capacity(n);
-        for chunk in bytes.chunks_exact(2) {
+        for chunk in bytes.as_chunks::<2>().0 {
             raw.push(i16::from_le_bytes([chunk[0], chunk[1]]) as f32);
         }
         if self.hp_filter_on {
@@ -946,7 +946,7 @@ mod tests {
             let dpkt = Packet::new(0, TimeBase::new(1, SAMPLE_RATE as i64), pkt.data.clone());
             dec.send_packet(&dpkt).unwrap();
             if let Frame::Audio(a) = dec.receive_frame().unwrap() {
-                for chunk in a.data[0].chunks_exact(2) {
+                for chunk in a.data[0].as_chunks::<2>().0 {
                     let s = i16::from_le_bytes([chunk[0], chunk[1]]);
                     assert!(s.abs() as i32 <= 32767, "sample out of range: {s}");
                     decoded += 1;

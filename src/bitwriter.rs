@@ -9,7 +9,7 @@
 use oxideav_core::{Error, Result};
 
 use crate::bitreader::CbStageIndices;
-use crate::{FrameMode, FRAME_BYTES_20MS, FRAME_BYTES_30MS};
+use crate::{FRAME_BYTES_20MS, FRAME_BYTES_30MS, FrameMode};
 
 /// Simple MSB-first bit writer over a pre-allocated byte buffer.
 pub struct BitWriter<'a> {

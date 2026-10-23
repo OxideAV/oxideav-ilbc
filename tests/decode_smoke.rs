@@ -36,7 +36,9 @@ fn registry_roundtrip_20ms() {
     // Ensure at least one non-zero sample is produced (sanity that the
     // pipeline is actually exercising the synthesis path).
     let any_nonzero = a.data[0]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .any(|c| i16::from_le_bytes([c[0], c[1]]) != 0);
     assert!(any_nonzero, "decoder produced all-zero PCM");
 }
@@ -90,7 +92,9 @@ fn deterministic_known_payload_20ms() {
     // being consulted. Bit-exact magnitude against a reference is
     // deferred — the RFC test vectors ship separately from this repo.
     let any_nonzero = a1.data[0]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .any(|c| i16::from_le_bytes([c[0], c[1]]) != 0);
     assert!(any_nonzero, "decoder produced all-zero PCM");
 }

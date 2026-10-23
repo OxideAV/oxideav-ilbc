@@ -45,7 +45,7 @@ fn decode_stream(packets: &[Vec<u8>]) -> Vec<i16> {
         .with_pts(i as i64 * 160);
         dec.send_packet(&pkt).unwrap();
         if let Frame::Audio(a) = dec.receive_frame().unwrap() {
-            for chunk in a.data[0].chunks_exact(2) {
+            for chunk in a.data[0].as_chunks::<2>().0 {
                 out.push(i16::from_le_bytes([chunk[0], chunk[1]]));
             }
         }

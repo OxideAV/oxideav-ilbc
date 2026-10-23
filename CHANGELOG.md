@@ -61,6 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- edition 2024, MSRV 1.95
 - The §4.6 enhancer constraint `b` (`ENH_ALPHA0`) now uses the
   normative RFC 3951 §4.6.4 spec value `0.05`; an earlier round had
   tuned it down to `0.005` to maximise the self-referential

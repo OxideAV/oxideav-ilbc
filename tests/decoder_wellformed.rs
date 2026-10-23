@@ -38,7 +38,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use oxideav_core::{CodecId, CodecParameters, Frame, Packet, SampleFormat, TimeBase};
-use oxideav_ilbc::{FrameMode, CODEC_ID_STR, SAMPLE_RATE};
+use oxideav_ilbc::{CODEC_ID_STR, FrameMode, SAMPLE_RATE};
 
 fn fixture_dir(name: &str) -> PathBuf {
     PathBuf::from("../../docs/audio/ilbc/fixtures").join(name)
@@ -64,7 +64,9 @@ fn parse_wav_pcm(buf: &[u8]) -> Vec<i16> {
         off += 8;
         if id == b"data" {
             return buf[off..off + size]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| i16::from_le_bytes([c[0], c[1]]))
                 .collect();
         }
@@ -90,7 +92,7 @@ fn decode_pcm(frames: &[Vec<u8>]) -> Vec<i16> {
         let Frame::Audio(a) = dec.receive_frame().expect("receive_frame") else {
             panic!("expected audio frame for packet {i}");
         };
-        for chunk in a.data[0].chunks_exact(2) {
+        for chunk in a.data[0].as_chunks::<2>().0 {
             pcm.push(i16::from_le_bytes([chunk[0], chunk[1]]));
         }
     }

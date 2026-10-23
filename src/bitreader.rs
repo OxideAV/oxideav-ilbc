@@ -23,7 +23,7 @@
 
 use oxideav_core::{Error, Result};
 
-use crate::{FrameMode, FRAME_BYTES_20MS, FRAME_BYTES_30MS};
+use crate::{FRAME_BYTES_20MS, FRAME_BYTES_30MS, FrameMode};
 
 /// Simple MSB-first bit reader over a byte slice.
 pub struct BitReader<'a> {
@@ -137,7 +137,9 @@ pub fn parse_frame(packet: &[u8]) -> Result<FrameParams> {
     // block is `extra_*` (3 stages).
     let lsf_idx = logical
         .lsf_idx
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|c| [c[0] as u16, c[1] as u16, c[2] as u16])
         .collect::<Vec<_>>();
     let boundary = CbStageIndices {

@@ -11,7 +11,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use oxideav_core::{CodecId, CodecParameters, Frame, Packet, SampleFormat, TimeBase};
-use oxideav_ilbc::{storage, FrameMode, CODEC_ID_STR, SAMPLE_RATE};
+use oxideav_ilbc::{CODEC_ID_STR, FrameMode, SAMPLE_RATE, storage};
 
 fn fixture_dir(name: &str) -> PathBuf {
     PathBuf::from("../../docs/audio/ilbc/fixtures").join(name)

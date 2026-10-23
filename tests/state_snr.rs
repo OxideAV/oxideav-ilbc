@@ -19,8 +19,8 @@
 //! This test is printed rather than asserted — it's a diagnostic run
 //! via `cargo test -- --nocapture state_snr`.
 
-use oxideav_ilbc::state::{reconstruct_scalar_state, STATE_FRGQ_TBL, STATE_SQ3_TBL};
 use oxideav_ilbc::FrameMode;
+use oxideav_ilbc::state::{STATE_FRGQ_TBL, STATE_SQ3_TBL, reconstruct_scalar_state};
 
 /// All-zero filter: `out[n] = sum_k coef[k] * in[n-k]`, coef[0] = 1.0.
 fn all_zero(inp: &[f32], coef: &[f32], out: &mut [f32], order: usize) {

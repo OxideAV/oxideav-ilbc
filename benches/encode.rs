@@ -29,12 +29,12 @@
 //! Run with:
 //!     cargo bench -p oxideav-ilbc --bench encode
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use oxideav_core::{
     AudioFrame, CodecId, CodecOptions, CodecParameters, Encoder, Error, Frame, SampleFormat,
 };
-use oxideav_ilbc::{encoder, FrameMode, CODEC_ID_STR, SAMPLE_RATE};
+use oxideav_ilbc::{CODEC_ID_STR, FrameMode, SAMPLE_RATE, encoder};
 
 /// Deterministic xorshift32 — shared with the sibling bench files.
 fn xorshift32(state: &mut u32) -> u32 {

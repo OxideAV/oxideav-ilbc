@@ -25,7 +25,7 @@ use oxideav_core::{
 };
 use oxideav_core::{CodecRegistry, Encoder};
 
-use oxideav_ilbc::{FrameMode, CODEC_ID_STR, SAMPLE_RATE};
+use oxideav_ilbc::{CODEC_ID_STR, FrameMode, SAMPLE_RATE};
 
 fn gen_voiced_clean(samples: usize) -> Vec<f32> {
     let f0 = 130.0f32;
@@ -97,7 +97,7 @@ fn round_trip(mode: FrameMode, hp: bool, pcm: &[i16]) -> Vec<i16> {
         let decoder_pkt = Packet::new(0, TimeBase::new(1, SAMPLE_RATE as i64), pkt.data.clone());
         dec.send_packet(&decoder_pkt).unwrap();
         if let Frame::Audio(a) = dec.receive_frame().unwrap() {
-            for chunk in a.data[0].chunks_exact(2) {
+            for chunk in a.data[0].as_chunks::<2>().0 {
                 decoded.push(i16::from_le_bytes([chunk[0], chunk[1]]));
             }
         }
@@ -151,11 +151,7 @@ fn per_frame_best_snr_avg(
             count += 1;
         }
     }
-    if count == 0 {
-        0.0
-    } else {
-        sum / count as f64
-    }
+    if count == 0 { 0.0 } else { sum / count as f64 }
 }
 
 #[test]

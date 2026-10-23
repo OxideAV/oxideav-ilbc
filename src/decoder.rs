@@ -13,16 +13,16 @@
 use oxideav_core::Decoder;
 use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result};
 
-use crate::bitreader::{parse_frame, FrameParams};
+use crate::bitreader::{FrameParams, parse_frame};
 use crate::cb::{construct_excitation, construct_excitation_veclen, update_cb_memory};
-use crate::enhancer::{enhance_frame, EnhancerState};
-use crate::hp_filter::{hp_output, HpOutputState};
-use crate::lsf::{decode_and_interpolate, dequant_lsf, LsfState};
+use crate::enhancer::{EnhancerState, enhance_frame};
+use crate::hp_filter::{HpOutputState, hp_output};
+use crate::lsf::{LsfState, decode_and_interpolate, dequant_lsf};
 use crate::state::reconstruct_scalar_state;
 use crate::synthesis::{
-    conceal_residual, plc_record_good, synthesise_blocks, synthesise_frame, SynthState,
+    SynthState, conceal_residual, plc_record_good, synthesise_blocks, synthesise_frame,
 };
-use crate::{FrameMode, CB_LMEM, CODEC_ID_STR, LPC_ORDER, SAMPLE_RATE, STATE_LEN, SUBL};
+use crate::{CB_LMEM, CODEC_ID_STR, FrameMode, LPC_ORDER, SAMPLE_RATE, STATE_LEN, SUBL};
 
 /// Build a boxed [`Decoder`] for iLBC.
 pub fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
@@ -560,7 +560,7 @@ mod tests {
         };
         assert_eq!(a.samples, 160);
         assert_eq!(a.data[0].len(), 160 * 2);
-        for chunk in a.data[0].chunks_exact(2) {
+        for chunk in a.data[0].as_chunks::<2>().0 {
             let s = i16::from_le_bytes([chunk[0], chunk[1]]);
             // sample is finite by construction (clamped + round + cast).
             let _ = s;
@@ -686,7 +686,9 @@ mod tests {
     /// tracks the preceding frames (not a zero/near-zero block).
     fn frame_energy(a: &AudioFrame) -> f64 {
         a.data[0]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| {
                 let s = i16::from_le_bytes([c[0], c[1]]) as f64;
                 s * s
@@ -747,7 +749,7 @@ mod tests {
             let Frame::Audio(a) = dec.receive_frame().unwrap() else {
                 panic!("audio frame expected");
             };
-            for chunk in a.data[0].chunks_exact(2) {
+            for chunk in a.data[0].as_chunks::<2>().0 {
                 let s = i16::from_le_bytes([chunk[0], chunk[1]]);
                 // Not stuck at the clip rails.
                 // sample is finite by construction (clamped + round + cast).
@@ -780,7 +782,9 @@ mod tests {
                 panic!("expected audio frame");
             };
             a.data[0]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| i16::from_le_bytes([c[0], c[1]]))
                 .collect()
         }
@@ -838,7 +842,7 @@ mod tests {
             let Frame::Audio(a) = dec.receive_frame().unwrap() else {
                 panic!("expected audio frame");
             };
-            for chunk in a.data[0].chunks_exact(2) {
+            for chunk in a.data[0].as_chunks::<2>().0 {
                 let s = i16::from_le_bytes([chunk[0], chunk[1]]);
                 assert!(s.abs() < 32000, "post-filter output blew up: {s}");
             }

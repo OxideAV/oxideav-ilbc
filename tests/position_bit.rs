@@ -23,7 +23,7 @@ use oxideav_core::{
 use oxideav_core::{CodecRegistry, Encoder};
 
 use oxideav_ilbc::bitreader::parse_frame;
-use oxideav_ilbc::{FrameMode, CODEC_ID_STR, SAMPLE_RATE};
+use oxideav_ilbc::{CODEC_ID_STR, FrameMode, SAMPLE_RATE};
 
 fn pcm_to_audio_frame(pcm: &[i16]) -> Frame {
     let mut bytes = Vec::with_capacity(pcm.len() * 2);
@@ -190,7 +190,7 @@ fn round_trip_voiced_onset_frame() {
     assert_eq!(a.samples, 160);
     let mut max_abs = 0i32;
     let mut clip_count = 0usize;
-    for chunk in a.data[0].chunks_exact(2) {
+    for chunk in a.data[0].as_chunks::<2>().0 {
         let s = i16::from_le_bytes([chunk[0], chunk[1]]);
         max_abs = max_abs.max(s.unsigned_abs() as i32);
         if s == i16::MIN || s == i16::MAX {
@@ -263,7 +263,7 @@ fn round_trip_late_onset_exercises_variable_start_idx() {
     let mut max_abs = 0i32;
     let mut clip_count = 0usize;
     let mut sum_sq = 0u64;
-    for chunk in a.data[0].chunks_exact(2) {
+    for chunk in a.data[0].as_chunks::<2>().0 {
         let s = i16::from_le_bytes([chunk[0], chunk[1]]);
         let av = s.unsigned_abs() as i32;
         max_abs = max_abs.max(av);

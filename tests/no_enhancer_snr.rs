@@ -13,10 +13,10 @@ use oxideav_core::{
 
 use oxideav_ilbc::bitreader::parse_frame;
 use oxideav_ilbc::cb::{construct_excitation, update_cb_memory};
-use oxideav_ilbc::lsf::{decode_and_interpolate, dequant_lsf, LsfState};
+use oxideav_ilbc::lsf::{LsfState, decode_and_interpolate, dequant_lsf};
 use oxideav_ilbc::state::reconstruct_scalar_state;
-use oxideav_ilbc::synthesis::{synthesise_frame, SynthState};
-use oxideav_ilbc::{FrameMode, CB_LMEM, CODEC_ID_STR, LPC_ORDER, SAMPLE_RATE, STATE_LEN, SUBL};
+use oxideav_ilbc::synthesis::{SynthState, synthesise_frame};
+use oxideav_ilbc::{CB_LMEM, CODEC_ID_STR, FrameMode, LPC_ORDER, SAMPLE_RATE, STATE_LEN, SUBL};
 
 struct BypassDecoder {
     lsf_state: LsfState,
@@ -225,11 +225,7 @@ fn per_frame_best_snr_avg(
             count += 1;
         }
     }
-    if count == 0 {
-        0.0
-    } else {
-        sum / count as f64
-    }
+    if count == 0 { 0.0 } else { sum / count as f64 }
 }
 
 #[test]
