@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `#[doc(hidden)]` on the internal `bitreader`, `cb`, `hp_filter`, `lsf`,
+  `state` and `synthesis` modules (bit unpacking, codebook, filters, LSF,
+  state reconstruction and synthesis kernels). `FrameMode` (RFC 3951's two
+  frame lengths) stays exhaustive.
+
 ## [0.0.8](https://github.com/OxideAV/oxideav-ilbc/compare/v0.0.7...v0.0.8) - 2026-10-23
 
 ### Other
@@ -1177,7 +1184,6 @@ new floor.
 | Round 18 (prior) | 11.77 dB | 12.38 dB | 9.34 dB | 10.68 dB |
 | Round 19         | 24.81 dB | 26.54 dB | 22.14 dB | 24.53 dB |
 | Δ                | +13.04   | +14.16   | +12.80   | +13.85   |
-
 
 ## [0.0.2](https://github.com/OxideAV/oxideav-ilbc/compare/v0.0.1...v0.0.2) - 2026-04-25
 
