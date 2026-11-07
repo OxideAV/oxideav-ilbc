@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.9](https://github.com/OxideAV/oxideav-ilbc/compare/v0.0.8...v0.0.9) - 2026-11-07
+
+### Other
+
+- restore Cargo.lock touched by a local check
+- API hygiene: hide internal DSP / bit-unpacking modules
+
 ### Changed
 
 - `#[doc(hidden)]` on the internal `bitreader`, `cb`, `hp_filter`, `lsf`,
